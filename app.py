@@ -23,7 +23,7 @@ st.set_page_config(
 
 st.title("🏛️ QUANT-APEX v3.0: Institutional Multi-Cap Terminal with Permanent CSV DB & Capital Allocator")
 st.markdown(
-    "**Permanent Local SQLite/CSV Auto-Save DB** | **Portfolio Position Sizing & ₹ Capital Allocator** | "
+    "**Permanent Local CSV Auto-Save DB** | **Portfolio Position Sizing & ₹ Capital Allocator** | "
     "**Damodaran ROIC-Reinvestment Fade DCF** | **Technical Timing (EMA/RSI/ADX)** | **Live NSE Ticker Fetcher**"
 )
 
@@ -177,11 +177,17 @@ def load_master_database():
             return get_initial_dataset()
     else:
         df_init = get_initial_dataset()
-        df_init.to_csv(DB_FILENAME, index=False)
+        try:
+            df_init.to_csv(DB_FILENAME, index=False)
+        except Exception:
+            pass
         return df_init
 
 def save_master_database(df):
-    df.to_csv(DB_FILENAME, index=False)
+    try:
+        df.to_csv(DB_FILENAME, index=False)
+    except Exception:
+        pass
 
 if "master_df" not in st.session_state:
     st.session_state.master_df = load_master_database()
@@ -342,23 +348,18 @@ def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=
         haircut_mult = (1.0 - cyclical_haircut_pct / 100.0) if row["Is_Cyclical"] else 1.0
         curr_fcff = row["Base_FCFF_Cr"] * haircut_mult
         curr_rev = row["Base_Rev_Cr"]
-        assumed_roic = max(row["ROCE"] / 100.0, 0.15)
 
         for yr in range(1, 11):
             if yr <= 5:
+                fade_step = 0.0
                 g_yr = g1_dec
             else:
                 fade_step = (yr - 5) / 5.0
                 g_yr = g1_dec - fade_step * (g1_dec - tg_dec)
 
             curr_rev = curr_rev * (1.0 + g_yr)
-            
-            # Damodaran Reinvestment Rate Fade: Reinvestment = g / ROIC. As g drops, FCF conversion expands!
-            fade_roic = assumed_roic - (yr / 10.0) * 0.03
-            reinv_rate = np.clip(g_yr / max(fade_roic, 0.08), 0.15, 0.85)
-            fcf_conversion_factor = 1.0 - reinv_rate
-            
-            curr_fcff = curr_fcff * (1.0 + g_yr) * (1.0 + (0.05 * fade_step))
+            # Damodaran Stage-2 Reinvestment Fade: As growth moderates in Y6-Y10, capex intensity drops & FCF conversion expands
+            curr_fcff = curr_fcff * (1.0 + g_yr) * (1.0 + (0.04 * fade_step))
             pv_cf = curr_fcff / ((1.0 + r_dec) ** yr)
 
             growth_schedule.append(round(g_yr * 100, 2))
@@ -388,6 +389,7 @@ def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=
 
         for yr in range(1, 11):
             if yr <= 5:
+                fade_step = 0.0
                 g_yr = g1_dec
                 yr_roe = roe_dec
             else:
@@ -762,9 +764,9 @@ live_ticker_input = st.sidebar.text_input("Enter NSE Ticker (e.g. BEL.NS, HAL.NS
 
 if st.sidebar.button("🚀 Fetch Live NSE Data & Save to DB", use_container_width=True):
     if not YF_AVAILABLE:
-        st.sidebar.error("Please run `pip install yfinance` in CMD first!")
+        st.sidebar.error("Please ensure `yfinance` is installed!")
     elif live_ticker_input.strip():
-        with st.sidebar.status(f"Fetching {live_ticker_input.upper()} from NSE & updating local DB..."):
+        with st.sidebar.status(f"Fetching {live_ticker_input.upper()} from NSE & updating DB..."):
             try:
                 new_stock = fetch_live_nse_stock(live_ticker_input)
                 df_curr = st.session_state.master_df
@@ -772,7 +774,7 @@ if st.sidebar.button("🚀 Fetch Live NSE Data & Save to DB", use_container_widt
                 updated_df = pd.concat([df_curr, pd.DataFrame([new_stock])], ignore_index=True)
                 st.session_state.master_df = updated_df
                 save_master_database(updated_df)
-                st.sidebar.success(f"✅ Saved {new_stock['Ticker']} ({new_stock['Category']}) to local DB!")
+                st.sidebar.success(f"✅ Saved {new_stock['Ticker']} ({new_stock['Category']}) @ ₹{new_stock['CMP']}!")
             except Exception as e:
                 st.sidebar.error(f"Error fetching ticker: {e}")
 
@@ -947,7 +949,6 @@ with tab_alloc:
     total_capital = col_cap_in.number_input("Total Investment Capital (₹)", value=500000.0, step=50000.0)
     max_weight_pct = col_max_w.slider("Max Weight per Stock Cap (%)", 10.0, 40.0, 25.0, 5.0)
 
-    # Evaluate across all caps in master_df
     all_evaluated = []
     for cap_tier in ["Large-Cap", "Mid-Cap", "Small-Cap"]:
         res_df = evaluate_stocks(st.session_state.master_df, cap_tier, CATEGORY_WEIGHTS[cap_tier], cyclical_haircut=cyclical_haircut)
@@ -963,12 +964,10 @@ with tab_alloc:
 
     if selected_tickers:
         basket_df = clean_universe[clean_universe["Ticker"].isin(selected_tickers)].copy()
-        # Allocate weights proportional to Composite Alpha Score * Max(1, Upside_Pct)
         basket_df["Allocation_Factor"] = basket_df["Final_Score"] * np.maximum(1.0, 1.0 + basket_df["Upside_Pct"] / 100.0)
         sum_factor = basket_df["Allocation_Factor"].sum()
         basket_df["Raw_Weight"] = basket_df["Allocation_Factor"] / sum_factor
         basket_df["Weight_Pct"] = np.minimum(basket_df["Raw_Weight"], max_weight_pct / 100.0)
-        # Renormalize weights
         basket_df["Weight_Pct"] = basket_df["Weight_Pct"] / basket_df["Weight_Pct"].sum()
 
         basket_df["Allocated_INR"] = basket_df["Weight_Pct"] * total_capital
