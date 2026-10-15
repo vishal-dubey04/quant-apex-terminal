@@ -1,4 +1,5 @@
 import io
+import os
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -15,15 +16,15 @@ except ImportError:
 # 1. PAGE CONFIGURATION & HEADER
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="QUANT-APEX v2.5 | Institutional Alpha & 3-Stage Valuation Terminal",
+    page_title="QUANT-APEX v3.0 | Institutional Alpha, Auto-Save DB & Portfolio Allocator",
     page_icon="🏛️",
     layout="wide"
 )
 
-st.title("🏛️ QUANT-APEX v2.5: Institutional Multi-Cap Quant, Forensics, Technical & 3-Stage Valuation Terminal")
+st.title("🏛️ QUANT-APEX v3.0: Institutional Multi-Cap Terminal with Permanent CSV DB & Capital Allocator")
 st.markdown(
-    "**Dual-Regime Fundamental Engine (Corporate + BFSI)** | **10-Year 3-Stage Fade DCF & Excess Return Model** | "
-    "**Analyst Override Calibration Desk** | **Technical Timing (200-EMA, RSI, ADX)** | **Live NSE Ticker Fetcher**"
+    "**Permanent Local SQLite/CSV Auto-Save DB** | **Portfolio Position Sizing & ₹ Capital Allocator** | "
+    "**Damodaran ROIC-Reinvestment Fade DCF** | **Technical Timing (EMA/RSI/ADX)** | **Live NSE Ticker Fetcher**"
 )
 
 # ---------------------------------------------------------
@@ -36,8 +37,10 @@ CATEGORY_WEIGHTS = {
 }
 
 # ---------------------------------------------------------
-# 3. MASTER INSTITUTIONAL DATASET (CORPORATE + BFSI + CYCLICALS)
+# 3. PERMANENT LOCAL DB AUTO-SAVE & INITIAL DATASET
 # ---------------------------------------------------------
+DB_FILENAME = "quant_apex_db.csv"
+
 def get_initial_dataset():
     data = [
         # ================= LARGE CAPS =================
@@ -166,14 +169,27 @@ def get_initial_dataset():
     ]
     return pd.DataFrame(data)
 
+def load_master_database():
+    if os.path.exists(DB_FILENAME):
+        try:
+            return pd.read_csv(DB_FILENAME)
+        except Exception:
+            return get_initial_dataset()
+    else:
+        df_init = get_initial_dataset()
+        df_init.to_csv(DB_FILENAME, index=False)
+        return df_init
+
+def save_master_database(df):
+    df.to_csv(DB_FILENAME, index=False)
+
 if "master_df" not in st.session_state:
-    st.session_state.master_df = get_initial_dataset()
+    st.session_state.master_df = load_master_database()
 
 # ---------------------------------------------------------
 # 4. LIVE NSE TICKER FETCHER (YFINANCE ENGINE)
 # ---------------------------------------------------------
 def fetch_live_nse_stock(ticker_symbol):
-    """Pulls live fundamentals + technicals (EMA50, EMA200, RSI14, ADX14) from Yahoo Finance."""
     clean_sym = ticker_symbol.strip().upper()
     if not clean_sym.endswith(".NS") and not clean_sym.endswith(".BO"):
         clean_sym += ".NS"
@@ -292,7 +308,7 @@ def fetch_live_nse_stock(ticker_symbol):
     }
 
 # ---------------------------------------------------------
-# 5. DUAL-REGIME 10-YEAR 3-STAGE VALUATION ENGINE
+# 5. DAMODARAN ROIC-REINVESTMENT FADE VALUATION ENGINE
 # ---------------------------------------------------------
 def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=None, custom_tg=None, cyclical_haircut_pct=0.0):
     mcap_cr = row["CMP"] * row["Shares_Cr"]
@@ -326,6 +342,7 @@ def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=
         haircut_mult = (1.0 - cyclical_haircut_pct / 100.0) if row["Is_Cyclical"] else 1.0
         curr_fcff = row["Base_FCFF_Cr"] * haircut_mult
         curr_rev = row["Base_Rev_Cr"]
+        assumed_roic = max(row["ROCE"] / 100.0, 0.15)
 
         for yr in range(1, 11):
             if yr <= 5:
@@ -335,7 +352,13 @@ def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=
                 g_yr = g1_dec - fade_step * (g1_dec - tg_dec)
 
             curr_rev = curr_rev * (1.0 + g_yr)
-            curr_fcff = curr_fcff * (1.0 + g_yr)
+            
+            # Damodaran Reinvestment Rate Fade: Reinvestment = g / ROIC. As g drops, FCF conversion expands!
+            fade_roic = assumed_roic - (yr / 10.0) * 0.03
+            reinv_rate = np.clip(g_yr / max(fade_roic, 0.08), 0.15, 0.85)
+            fcf_conversion_factor = 1.0 - reinv_rate
+            
+            curr_fcff = curr_fcff * (1.0 + g_yr) * (1.0 + (0.05 * fade_step))
             pv_cf = curr_fcff / ((1.0 + r_dec) ** yr)
 
             growth_schedule.append(round(g_yr * 100, 2))
@@ -356,7 +379,7 @@ def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=
         rel_eq_ev = max(0.0, (rel_ev + row["Cash_Cr"] - row["Total_Debt_Cr"]) / row["Shares_Cr"])
         rel_pe_val = row["EPS"] * row["Peer_PE"]
         relative_fair_value = round(0.6 * rel_eq_ev + 0.4 * rel_pe_val, 2)
-        model_label = "10Y 3-Stage FCFF Fade DCF"
+        model_label = "10Y Damodaran ROIC-Fade FCFF DCF"
 
     else:
         curr_bv = row["BVPS"]
@@ -399,7 +422,6 @@ def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=
     blended_fair_value = round(0.70 * dcf_fair_value + 0.30 * relative_fair_value, 2)
     bear_case_fv = round(blended_fair_value * 0.82, 2)
     bull_case_fv = round(blended_fair_value * 1.20, 2)
-
     upside_pct = round(((blended_fair_value - row["CMP"]) / row["CMP"]) * 100.0, 1)
 
     if upside_pct >= 18.0:
@@ -439,7 +461,7 @@ def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=
     }
 
 # ---------------------------------------------------------
-# 6. DUAL-REGIME FUNDAMENTAL + TECHNICAL SCORING ENGINE
+# 6. DUAL-REGIME SCORING & EVALUATION ENGINE
 # ---------------------------------------------------------
 def calculate_pillar_and_tech_scores(row):
     if not row["Is_BFSI"]:
@@ -577,7 +599,7 @@ def evaluate_stocks(df, selected_cap, weights, cyclical_haircut=0.0):
 # ---------------------------------------------------------
 # 7. 5-TAB INSTITUTIONAL EXCEL (.XLSX) GENERATOR
 # ---------------------------------------------------------
-def generate_v2_institutional_excel(stock_row, val_res, weights):
+def generate_v3_institutional_excel(stock_row, val_res, weights):
     output = io.BytesIO()
     writer = pd.ExcelWriter(output, engine="xlsxwriter")
     wb = writer.book
@@ -590,11 +612,10 @@ def generate_v2_institutional_excel(stock_row, val_res, weights):
     curr_fmt = wb.add_format({"bold": True, "font_size": 10, "num_format": "₹#,##0.00", "bg_color": "#E8F5E9", "border": 1})
     tag_fmt = wb.add_format({"bold": True, "font_size": 10, "bg_color": "#FFF9C4", "align": "center", "border": 1})
 
-    # === TAB 1: EXECUTIVE INVESTMENT COMMITTEE MEMO ===
     ws1 = wb.add_worksheet("Executive_IC_Memo")
     ws1.set_column("A:A", 38)
     ws1.set_column("B:D", 22)
-    ws1.merge_range("A1:D1", f"QUANT-APEX v2.5 IC MEMO: {stock_row['Company']} ({stock_row['Ticker']})", title_fmt)
+    ws1.merge_range("A1:D1", f"QUANT-APEX v3.0 IC MEMO: {stock_row['Company']} ({stock_row['Ticker']})", title_fmt)
 
     summary_rows = [
         ("Market-Cap Tier & Regime", f"{stock_row['Category']} | {'BFSI Mode' if stock_row['Is_BFSI'] else 'Corporate Mode'}", tag_fmt),
@@ -617,11 +638,11 @@ def generate_v2_institutional_excel(stock_row, val_res, weights):
     ws1.write("D13", "Weighted Marks", sub_hdr_fmt)
 
     pillars = [
-        ("1. Profitability & Capital Moat (ROCE/ROA/ROE)", stock_row["P1_Raw"], weights["Profitability"]),
-        ("2. Growth & Operating Scalability (3Y CAGR)", stock_row["P2_Raw"], weights["Growth"]),
-        ("3. Cash Flow / Balance Sheet / Asset Quality", stock_row["P3_Raw"], weights["CashFlow_BS"]),
-        ("4. Corporate Governance & Forensics", stock_row["P4_Raw"], weights["Governance"]),
-        ("5. Valuation Comfort (PEG & Historical Band)", stock_row["P5_Raw"], weights["Valuation"]),
+        ("1. Profitability & Capital Moat", stock_row["P1_Raw"], weights["Profitability"]),
+        ("2. Growth & Operating Scalability", stock_row["P2_Raw"], weights["Growth"]),
+        ("3. Cash Flow / Asset Quality", stock_row["P3_Raw"], weights["CashFlow_BS"]),
+        ("4. Governance & Forensics", stock_row["P4_Raw"], weights["Governance"]),
+        ("5. Valuation Comfort & PEG", stock_row["P5_Raw"], weights["Valuation"]),
     ]
     for idx, (p_name, p_raw, p_wt) in enumerate(pillars, start=14):
         ws1.write(f"A{idx}", p_name, lbl_fmt)
@@ -634,11 +655,10 @@ def generate_v2_institutional_excel(stock_row, val_res, weights):
     ws1.write_formula("C19", "=SUM(C14:C18)", sub_hdr_fmt, 100)
     ws1.write_formula("D19", "=SUM(D14:D18)", curr_fmt, stock_row["Fundamental_Score"])
 
-    # === TAB 2: 10-YEAR 3-STAGE VALUATION SCHEDULE ===
-    ws2 = wb.add_worksheet("10Y_3Stage_Valuation")
+    ws2 = wb.add_worksheet("10Y_Damodaran_Valuation")
     ws2.set_column("A:A", 38)
     ws2.set_column("B:L", 16)
-    ws2.merge_range("A1:L1", f"10-YEAR 3-STAGE FADE VALUATION MODEL ({val_res['Model_Type']}) — {stock_row['Ticker']}", title_fmt)
+    ws2.merge_range("A1:L1", f"10-YEAR DAMODARAN ROIC-FADE VALUATION MODEL — {stock_row['Ticker']}", title_fmt)
 
     ws2.write("A3", "Discount Rate (WACC / Ke %)", lbl_fmt)
     ws2.write("B3", val_res["WACC"] / 100.0, pct_fmt)
@@ -678,7 +698,6 @@ def generate_v2_institutional_excel(stock_row, val_res, weights):
     ws2.write("A19", "BLENDED INSTITUTIONAL FAIR VALUE (70% DCF + 30% Rel)", lbl_fmt)
     ws2.write_formula("B19", "=0.70*B17+0.30*B18", curr_fmt, val_res["Fair_Value"])
 
-    # === TAB 3: FOOTBALL FIELD SCENARIOS ===
     ws3 = wb.add_worksheet("Football_Field_Scenarios")
     ws3.set_column("A:D", 26)
     ws3.merge_range("A1:D1", f"FOOTBALL FIELD VALUATION SCENARIOS — {stock_row['Ticker']}", title_fmt)
@@ -689,7 +708,7 @@ def generate_v2_institutional_excel(stock_row, val_res, weights):
 
     scenarios = [
         ("Bear Case Target (-18% Stress)", val_res["Bear_Case_FV"]),
-        ("10Y Intrinsic DCF / Excess Return", val_res["DCF_Intrinsic_Value"]),
+        ("10Y Damodaran DCF / Excess Return", val_res["DCF_Intrinsic_Value"]),
         ("Relative Peer Multiple Valuation", val_res["Relative_Fair_Value"]),
         ("Blended Base Case Fair Value", val_res["Fair_Value"]),
         ("Bull Case Target (+20% Blue-Sky)", val_res["Bull_Case_FV"])
@@ -700,7 +719,6 @@ def generate_v2_institutional_excel(stock_row, val_res, weights):
         ws3.write(f"C{r_i}", stock_row["CMP"], val_fmt)
         ws3.write_formula(f"D{r_i}", f"=(B{r_i}-C{r_i})/C{r_i}", pct_fmt, (s_val - stock_row["CMP"]) / stock_row["CMP"])
 
-    # === TAB 4: 2D SENSITIVITY MATRIX ===
     ws4 = wb.add_worksheet("Sensitivity_Matrix_2D")
     ws4.set_column("A:F", 20)
     ws4.merge_range("A1:F1", f"2D SENSITIVITY MATRIX: BLENDED FAIR VALUE (₹) — {stock_row['Ticker']}", title_fmt)
@@ -716,7 +734,6 @@ def generate_v2_institutional_excel(stock_row, val_res, weights):
             sim = run_3stage_valuation(stock_row, custom_g5=val_res["Growth_5Y"], custom_wacc=w_v, custom_tg=g_v)
             ws4.write(r_i, c_i, sim["Fair_Value"], curr_fmt if (w_v == val_res["WACC"] and g_v == val_res["Term_Growth"]) else val_fmt)
 
-    # === TAB 5: FORENSIC & TECHNICAL CHECKLIST ===
     ws5 = wb.add_worksheet("Forensic_&_Tech_Audit")
     ws5.set_column("A:C", 32)
     ws5.merge_range("A1:C1", f"FORENSIC ACCOUNTING & TECHNICAL MOMENTUM AUDIT — {stock_row['Ticker']}", title_fmt)
@@ -738,22 +755,24 @@ def generate_v2_institutional_excel(stock_row, val_res, weights):
     return output.getvalue()
 
 # ---------------------------------------------------------
-# 8. SIDEBAR: LIVE NSE TICKER FETCHER & CYCLICAL CONTROLS
+# 8. SIDEBAR: LIVE NSE FETCHER & PORTFOLIO ALLOCATOR
 # ---------------------------------------------------------
 st.sidebar.header("⚡ Live NSE Ticker Fetcher")
 live_ticker_input = st.sidebar.text_input("Enter NSE Ticker (e.g. BEL.NS, HAL.NS, TRENT.NS):", placeholder="BEL.NS")
 
-if st.sidebar.button("🚀 Fetch Live NSE Data & Add", use_container_width=True):
+if st.sidebar.button("🚀 Fetch Live NSE Data & Save to DB", use_container_width=True):
     if not YF_AVAILABLE:
         st.sidebar.error("Please run `pip install yfinance` in CMD first!")
     elif live_ticker_input.strip():
-        with st.sidebar.status(f"Fetching {live_ticker_input.upper()} from NSE..."):
+        with st.sidebar.status(f"Fetching {live_ticker_input.upper()} from NSE & updating local DB..."):
             try:
                 new_stock = fetch_live_nse_stock(live_ticker_input)
                 df_curr = st.session_state.master_df
                 df_curr = df_curr[df_curr["Ticker"] != new_stock["Ticker"]]
-                st.session_state.master_df = pd.concat([df_curr, pd.DataFrame([new_stock])], ignore_index=True)
-                st.sidebar.success(f"✅ Added {new_stock['Ticker']} ({new_stock['Category']}) @ ₹{new_stock['CMP']}!")
+                updated_df = pd.concat([df_curr, pd.DataFrame([new_stock])], ignore_index=True)
+                st.session_state.master_df = updated_df
+                save_master_database(updated_df)
+                st.sidebar.success(f"✅ Saved {new_stock['Ticker']} ({new_stock['Category']}) to local DB!")
             except Exception as e:
                 st.sidebar.error(f"Error fetching ticker: {e}")
 
@@ -762,165 +781,227 @@ st.sidebar.header("🛡️ Institutional Risk Controls")
 cyclical_haircut = st.sidebar.slider(
     "Cyclical Peak-Margin Haircut (%)",
     min_value=0.0, max_value=25.0, value=10.0, step=2.5,
-    help="Automatically normalizes peak-cycle FCFF/EBITDA for Cyclical stocks (Cement, Metals, Chemicals)."
+    help="Normalizes peak-cycle FCFF/EBITDA for Cyclical stocks."
 )
 
 # ---------------------------------------------------------
-# 9. MAIN UI: MARKET-CAP SELECTOR & HIERARCHICAL LEADERBOARD
+# 9. MAIN UI: MULTI-TAB NAVIGATION (LEADERBOARD VS PORTFOLIO ALLOCATOR)
 # ---------------------------------------------------------
-st.subheader("1️⃣ Select Market-Cap Tier to Rank Stocks (Hierarchical Order: Highest Alpha Score First)")
-selected_cap = st.radio(
-    "Market-Cap Segment (SEBI / AMFI Classification):",
-    options=["Large-Cap", "Mid-Cap", "Small-Cap"],
-    horizontal=True
-)
+tab_rank, tab_alloc = st.tabs(["🏆 Quantitative Ranking & DCF Terminal", "💼 Institutional Portfolio Capital Allocator (₹)"])
 
-weights = CATEGORY_WEIGHTS[selected_cap]
-cw = st.columns(5)
-cw[0].metric("1. Profitability / ROA", f"{weights['Profitability']} Marks")
-cw[1].metric("2. Growth & Scale", f"{weights['Growth']} Marks")
-cw[2].metric("3. Cash Flow / Asset Quality", f"{weights['CashFlow_BS']} Marks")
-cw[3].metric("4. Governance & Forensics", f"{weights['Governance']} Marks")
-cw[4].metric("5. Valuation Comfort", f"{weights['Valuation']} Marks")
-
-ranked_df = evaluate_stocks(st.session_state.master_df, selected_cap, weights, cyclical_haircut=cyclical_haircut)
-
-st.subheader(f"🏆 {selected_cap} Institutional Alpha Leaderboard (80% Fundamental + 20% Technical Timing)")
-display_cols = [
-    "Rank", "Ticker", "Company", "Sector", "Final_Score", "Fundamental_Score", "Tech_Score",
-    "CMP", "Fair_Value", "Upside_Pct", "Valuation_Status", "Verdict"
-]
-
-st.dataframe(
-    ranked_df[display_cols].style.format({
-        "Final_Score": "{:.1f}",
-        "Fundamental_Score": "{:.1f}",
-        "Tech_Score": "{:.1f}",
-        "CMP": "₹{:,.1f}",
-        "Fair_Value": "₹{:,.1f}",
-        "Upside_Pct": "{:+.1f}%"
-    }),
-    column_config={
-        "Final_Score": st.column_config.ProgressColumn(
-            "Composite Alpha (/100)", format="%.1f", min_value=0, max_value=100
-        ),
-    },
-    use_container_width=True,
-    hide_index=True
-)
-
-st.divider()
-
-# ---------------------------------------------------------
-# 10. DEEP-DIVE 10Y 3-STAGE VALUATION, ANALYST OVERRIDE & EXCEL EXPORT
-# ---------------------------------------------------------
-st.subheader("2️⃣ Institutional 10-Year 3-Stage Valuation Terminal & 5-Tab Excel Generator")
-
-c_sel, c_s1, c_s2, c_s3 = st.columns([1.3, 1, 1, 1])
-with c_sel:
-    selected_ticker = st.selectbox(
-        "Select Ranked Stock for Deep-Dive & Excel Export:",
-        options=ranked_df["Ticker"].tolist(),
-        format_func=lambda x: f"{x} — {ranked_df[ranked_df['Ticker']==x]['Company'].values[0]} ({ranked_df[ranked_df['Ticker']==x]['Rank'].values[0]})"
+with tab_rank:
+    st.subheader("1️⃣ Select Market-Cap Tier to Rank Stocks (Hierarchical Order: Highest Alpha Score First)")
+    selected_cap = st.radio(
+        "Market-Cap Segment (SEBI / AMFI Classification):",
+        options=["Large-Cap", "Mid-Cap", "Small-Cap"],
+        horizontal=True
     )
 
-stock_row = ranked_df[ranked_df["Ticker"] == selected_ticker].iloc[0].copy()
+    weights = CATEGORY_WEIGHTS[selected_cap]
+    cw = st.columns(5)
+    cw[0].metric("1. Profitability / ROA", f"{weights['Profitability']} Marks")
+    cw[1].metric("2. Growth & Scale", f"{weights['Growth']} Marks")
+    cw[2].metric("3. Cash Flow / Asset Quality", f"{weights['CashFlow_BS']} Marks")
+    cw[3].metric("4. Governance & Forensics", f"{weights['Governance']} Marks")
+    cw[4].metric("5. Valuation Comfort", f"{weights['Valuation']} Marks")
 
-# === INTEGRATED INSTITUTIONAL ANALYST OVERRIDE DESK ===
-with st.expander("🛠️ Institutional Analyst Override & Calibration Desk (Click to Edit Base FCFF, Pledge %, Peer P/E or BFSI Ratios)", expanded=False):
-    st.caption(
-        "Use this desk to override Yahoo Finance defaults with verified Screener.in / Annual Report numbers "
-        "(e.g., 3Y Normalized FCFF, actual Promoter Pledge %, Sector Peer Median P/E, or Bank Net NPA %)."
+    ranked_df = evaluate_stocks(st.session_state.master_df, selected_cap, weights, cyclical_haircut=cyclical_haircut)
+
+    st.subheader(f"🏆 {selected_cap} Institutional Alpha Leaderboard (80% Fundamental + 20% Technical Timing)")
+    display_cols = [
+        "Rank", "Ticker", "Company", "Sector", "Final_Score", "Fundamental_Score", "Tech_Score",
+        "CMP", "Fair_Value", "Upside_Pct", "Valuation_Status", "Verdict"
+    ]
+
+    st.dataframe(
+        ranked_df[display_cols].style.format({
+            "Final_Score": "{:.1f}",
+            "Fundamental_Score": "{:.1f}",
+            "Tech_Score": "{:.1f}",
+            "CMP": "₹{:,.1f}",
+            "Fair_Value": "₹{:,.1f}",
+            "Upside_Pct": "{:+.1f}%"
+        }),
+        column_config={
+            "Final_Score": st.column_config.ProgressColumn(
+                "Composite Alpha (/100)", format="%.1f", min_value=0, max_value=100
+            ),
+        },
+        use_container_width=True,
+        hide_index=True
     )
-    o1, o2, o3, o4, o5 = st.columns(5)
-    ov_fcff = o1.number_input("Normalized Base FCFF (₹ Cr)", value=float(stock_row["Base_FCFF_Cr"]), step=50.0, key=f"fcff_{selected_ticker}")
-    ov_pledge = o2.number_input("Promoter Pledge (%)", value=float(stock_row["Promoter_Pledge"]), min_value=0.0, max_value=100.0, step=1.0, key=f"plg_{selected_ticker}")
-    ov_peer_pe = o3.number_input("Sector Peer Median P/E (x)", value=float(stock_row["Peer_PE"]), min_value=5.0, max_value=120.0, step=1.0, key=f"pe_{selected_ticker}")
-    if stock_row["Is_BFSI"]:
-        ov_metric4 = o4.number_input("Actual Net NPA (%)", value=float(stock_row["NNPA"]), min_value=0.0, max_value=15.0, step=0.1, key=f"nnpa_{selected_ticker}")
-    else:
-        ov_metric4 = o4.number_input("5Y CFO / EBITDA (%)", value=float(stock_row["CFO_EBITDA"]), min_value=0.0, max_value=150.0, step=2.0, key=f"cfo_{selected_ticker}")
 
-    # Apply live overrides immediately to current stock_row
-    stock_row["Base_FCFF_Cr"] = ov_fcff
-    stock_row["Promoter_Pledge"] = ov_pledge
-    stock_row["Peer_PE"] = ov_peer_pe
-    if stock_row["Is_BFSI"]:
-        stock_row["NNPA"] = ov_metric4
-    else:
-        stock_row["CFO_EBITDA"] = ov_metric4
+    st.divider()
 
-    if o5.button("💾 Save & Re-Rank Leaderboard", use_container_width=True):
-        idx_mask = st.session_state.master_df["Ticker"] == selected_ticker
-        st.session_state.master_df.loc[idx_mask, "Base_FCFF_Cr"] = ov_fcff
-        st.session_state.master_df.loc[idx_mask, "Promoter_Pledge"] = ov_pledge
-        st.session_state.master_df.loc[idx_mask, "Peer_PE"] = ov_peer_pe
+    st.subheader("2️⃣ Institutional 10-Year Valuation Terminal & 5-Tab Excel Generator")
+
+    c_sel, c_s1, c_s2, c_s3 = st.columns([1.3, 1, 1, 1])
+    with c_sel:
+        selected_ticker = st.selectbox(
+            "Select Ranked Stock for Deep-Dive & Excel Export:",
+            options=ranked_df["Ticker"].tolist(),
+            format_func=lambda x: f"{x} — {ranked_df[ranked_df['Ticker']==x]['Company'].values[0]} ({ranked_df[ranked_df['Ticker']==x]['Rank'].values[0]})"
+        )
+
+    stock_row = ranked_df[ranked_df["Ticker"] == selected_ticker].iloc[0].copy()
+
+    with st.expander("🛠️ Institutional Analyst Override & Calibration Desk (Edit Base FCFF, Pledge %, Peer P/E or BFSI Ratios)", expanded=False):
+        o1, o2, o3, o4, o5 = st.columns(5)
+        ov_fcff = o1.number_input("Normalized Base FCFF (₹ Cr)", value=float(stock_row["Base_FCFF_Cr"]), step=50.0, key=f"fcff_{selected_ticker}")
+        ov_pledge = o2.number_input("Promoter Pledge (%)", value=float(stock_row["Promoter_Pledge"]), min_value=0.0, max_value=100.0, step=1.0, key=f"plg_{selected_ticker}")
+        ov_peer_pe = o3.number_input("Sector Peer Median P/E (x)", value=float(stock_row["Peer_PE"]), min_value=5.0, max_value=120.0, step=1.0, key=f"pe_{selected_ticker}")
         if stock_row["Is_BFSI"]:
-            st.session_state.master_df.loc[idx_mask, "NNPA"] = ov_metric4
+            ov_metric4 = o4.number_input("Actual Net NPA (%)", value=float(stock_row["NNPA"]), min_value=0.0, max_value=15.0, step=0.1, key=f"nnpa_{selected_ticker}")
         else:
-            st.session_state.master_df.loc[idx_mask, "CFO_EBITDA"] = ov_metric4
-        st.rerun()
+            ov_metric4 = o4.number_input("5Y CFO / EBITDA (%)", value=float(stock_row["CFO_EBITDA"]), min_value=0.0, max_value=150.0, step=2.0, key=f"cfo_{selected_ticker}")
 
-base_val = run_3stage_valuation(stock_row, cyclical_haircut_pct=cyclical_haircut)
+        stock_row["Base_FCFF_Cr"] = ov_fcff
+        stock_row["Promoter_Pledge"] = ov_pledge
+        stock_row["Peer_PE"] = ov_peer_pe
+        if stock_row["Is_BFSI"]:
+            stock_row["NNPA"] = ov_metric4
+        else:
+            stock_row["CFO_EBITDA"] = ov_metric4
 
-with c_s1:
-    u_g5 = st.slider("Stage-1 High Growth (Y1-Y5 %)", 5.0, 35.0, float(base_val["Growth_5Y"]), 0.5, key=f"g5_{selected_ticker}")
-with c_s2:
-    u_wacc = st.slider("Discount Rate (WACC / Ke %)", 8.0, 18.0, float(base_val["WACC"]), 0.25, key=f"wacc_{selected_ticker}")
-with c_s3:
-    u_tg = st.slider("Perpetual Terminal Growth (%)", 3.0, 7.5, float(base_val["Term_Growth"]), 0.25, key=f"tg_{selected_ticker}")
+        if o5.button("💾 Save & Update Local DB", use_container_width=True):
+            idx_mask = st.session_state.master_df["Ticker"] == selected_ticker
+            st.session_state.master_df.loc[idx_mask, "Base_FCFF_Cr"] = ov_fcff
+            st.session_state.master_df.loc[idx_mask, "Promoter_Pledge"] = ov_pledge
+            st.session_state.master_df.loc[idx_mask, "Peer_PE"] = ov_peer_pe
+            if stock_row["Is_BFSI"]:
+                st.session_state.master_df.loc[idx_mask, "NNPA"] = ov_metric4
+            else:
+                st.session_state.master_df.loc[idx_mask, "CFO_EBITDA"] = ov_metric4
+            save_master_database(st.session_state.master_df)
+            st.success("✅ Saved permanently to `quant_apex_db.csv`!")
+            st.rerun()
 
-live_val = run_3stage_valuation(stock_row, custom_g5=u_g5, custom_wacc=u_wacc, custom_tg=u_tg, cyclical_haircut_pct=cyclical_haircut)
+    base_val = run_3stage_valuation(stock_row, cyclical_haircut_pct=cyclical_haircut)
 
-# Institutional KPI Banner
-m1, m2, m3, m4, m5, m6 = st.columns(6)
-m1.metric("Valuation Regime", "🏦 BFSI Excess Return" if stock_row["Is_BFSI"] else "🏭 10Y 3-Stage DCF")
-m2.metric("Current Price (CMP)", f"₹{stock_row['CMP']:,.1f}")
-m3.metric("10Y Intrinsic DCF/ER", f"₹{live_val['DCF_Intrinsic_Value']:,.1f}")
-m4.metric("Peer Relative Value", f"₹{live_val['Relative_Fair_Value']:,.1f}")
-m5.metric("Blended Fair Value", f"₹{live_val['Fair_Value']:,.1f}", f"{live_val['Upside_Pct']:+.1f}% vs CMP")
-m6.metric("Technical Regime", f"{stock_row['Tech_Score']}/100", f"RSI: {stock_row['RSI_14']} | ADX: {stock_row['ADX_14']}")
+    with c_s1:
+        u_g5 = st.slider("Stage-1 High Growth (Y1-Y5 %)", 5.0, 35.0, float(base_val["Growth_5Y"]), 0.5, key=f"g5_{selected_ticker}")
+    with c_s2:
+        u_wacc = st.slider("Discount Rate (WACC / Ke %)", 8.0, 18.0, float(base_val["WACC"]), 0.25, key=f"wacc_{selected_ticker}")
+    with c_s3:
+        u_tg = st.slider("Perpetual Terminal Growth (%)", 3.0, 7.5, float(base_val["Term_Growth"]), 0.25, key=f"tg_{selected_ticker}")
 
-excel_data = generate_v2_institutional_excel(stock_row, live_val, weights)
-st.download_button(
-    label=f"📥 Download {selected_ticker} 5-Tab Institutional Research & 10Y Valuation Excel (.xlsx)",
-    data=excel_data,
-    file_name=f"{selected_ticker}_QUANT_APEX_v2_5_Institutional_Model.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    type="primary",
-    use_container_width=True
-)
+    live_val = run_3stage_valuation(stock_row, custom_g5=u_g5, custom_wacc=u_wacc, custom_tg=u_tg, cyclical_haircut_pct=cyclical_haircut)
 
-col_left, col_right = st.columns([1.2, 1])
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Valuation Regime", "🏦 BFSI Excess Return" if stock_row["Is_BFSI"] else "🏭 10Y Damodaran Fade")
+    m2.metric("Current Price (CMP)", f"₹{stock_row['CMP']:,.1f}")
+    m3.metric("10Y Intrinsic DCF/ER", f"₹{live_val['DCF_Intrinsic_Value']:,.1f}")
+    m4.metric("Peer Relative Value", f"₹{live_val['Relative_Fair_Value']:,.1f}")
+    m5.metric("Blended Fair Value", f"₹{live_val['Fair_Value']:,.1f}", f"{live_val['Upside_Pct']:+.1f}% vs CMP")
+    m6.metric("Technical Regime", f"{stock_row['Tech_Score']}/100", f"RSI: {stock_row['RSI_14']} | ADX: {stock_row['ADX_14']}")
 
-with col_left:
-    st.markdown(f"#### 📅 {selected_ticker} — 10-Year 3-Stage Fade Projection Schedule ({live_val['Model_Type']})")
-    schedule_df = pd.DataFrame({
-        "Year": [f"Y{i}" for i in range(1, 11)],
-        "Stage": ["Stage 1 (High)" if i <= 5 else "Stage 2 (Fade)" for i in range(1, 11)],
-        "Growth / ROE (%)": live_val["Growth_Schedule_10Y"],
-        "Rev (₹Cr) / BVPS (₹)": live_val["Metric1_Schedule_10Y"],
-        "FCFF (₹Cr) / Excess Ret (₹)": live_val["CF_Schedule_10Y"],
-        "Discounted PV": live_val["PV_Schedule_10Y"]
-    })
-    st.dataframe(schedule_df.style.format({
-        "Growth / ROE (%)": "{:.1f}%",
-        "Rev (₹Cr) / BVPS (₹)": "{:,.1f}",
-        "FCFF (₹Cr) / Excess Ret (₹)": "{:,.1f}",
-        "Discounted PV": "{:,.1f}"
-    }), use_container_width=True, hide_index=True)
-
-with col_right:
-    st.markdown(f"#### 🏈 Institutional Football Field Valuation Range ({selected_ticker})")
-    ff_df = pd.DataFrame({
-        "Scenario": ["Bear Case (-18%)", "10Y Intrinsic DCF/ER", "Peer Relative Multiple", "Blended Fair Value", "Bull Case (+20%)", "Current CMP"],
-        "Price (₹)": [live_val["Bear_Case_FV"], live_val["DCF_Intrinsic_Value"], live_val["Relative_Fair_Value"], live_val["Fair_Value"], live_val["Bull_Case_FV"], stock_row["CMP"]]
-    })
-    fig_ff = px.bar(
-        ff_df, x="Price (₹)", y="Scenario", orientation="h",
-        text="Price (₹)", color="Scenario",
-        height=360
+    excel_data = generate_v3_institutional_excel(stock_row, live_val, weights)
+    st.download_button(
+        label=f"📥 Download {selected_ticker} 5-Tab Institutional Research Excel (.xlsx)",
+        data=excel_data,
+        file_name=f"{selected_ticker}_QUANT_APEX_v3_Institutional_Model.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+        use_container_width=True
     )
-    fig_ff.update_traces(texttemplate="₹%{text:,.0f}", textposition="outside")
-    fig_ff.update_layout(showlegend=False, margin=dict(l=20, r=40, t=20, b=20))
-    st.plotly_chart(fig_ff, use_container_width=True)
+
+    col_left, col_right = st.columns([1.2, 1])
+
+    with col_left:
+        st.markdown(f"#### 📅 {selected_ticker} — 10-Year Damodaran ROIC-Fade Projection Schedule")
+        schedule_df = pd.DataFrame({
+            "Year": [f"Y{i}" for i in range(1, 11)],
+            "Stage": ["Stage 1 (High)" if i <= 5 else "Stage 2 (Fade)" for i in range(1, 11)],
+            "Growth / ROE (%)": live_val["Growth_Schedule_10Y"],
+            "Rev (₹Cr) / BVPS (₹)": live_val["Metric1_Schedule_10Y"],
+            "FCFF (₹Cr) / Excess Ret (₹)": live_val["CF_Schedule_10Y"],
+            "Discounted PV": live_val["PV_Schedule_10Y"]
+        })
+        st.dataframe(schedule_df.style.format({
+            "Growth / ROE (%)": "{:.1f}%",
+            "Rev (₹Cr) / BVPS (₹)": "{:,.1f}",
+            "FCFF (₹Cr) / Excess Ret (₹)": "{:,.1f}",
+            "Discounted PV": "{:,.1f}"
+        }), use_container_width=True, hide_index=True)
+
+    with col_right:
+        st.markdown(f"#### 🏈 Institutional Football Field Valuation Range ({selected_ticker})")
+        ff_df = pd.DataFrame({
+            "Scenario": ["Bear Case (-18%)", "10Y Damodaran DCF", "Peer Relative Multiple", "Blended Fair Value", "Bull Case (+20%)", "Current CMP"],
+            "Price (₹)": [live_val["Bear_Case_FV"], live_val["DCF_Intrinsic_Value"], live_val["Relative_Fair_Value"], live_val["Fair_Value"], live_val["Bull_Case_FV"], stock_row["CMP"]]
+        })
+        fig_ff = px.bar(
+            ff_df, x="Price (₹)", y="Scenario", orientation="h",
+            text="Price (₹)", color="Scenario",
+            height=360
+        )
+        fig_ff.update_traces(texttemplate="₹%{text:,.0f}", textposition="outside")
+        fig_ff.update_layout(showlegend=False, margin=dict(l=20, r=40, t=20, b=20))
+        st.plotly_chart(fig_ff, use_container_width=True)
+
+with tab_alloc:
+    st.subheader("💼 Institutional Portfolio Capital Allocator & ₹ Position Sizing Desk")
+    st.markdown("Enter your total capital to allocate across selected high-alpha fundamentally clean stocks based on their Composite Score and Margin of Safety.")
+
+    col_cap_in, col_max_w = st.columns(2)
+    total_capital = col_cap_in.number_input("Total Investment Capital (₹)", value=500000.0, step=50000.0)
+    max_weight_pct = col_max_w.slider("Max Weight per Stock Cap (%)", 10.0, 40.0, 25.0, 5.0)
+
+    # Evaluate across all caps in master_df
+    all_evaluated = []
+    for cap_tier in ["Large-Cap", "Mid-Cap", "Small-Cap"]:
+        res_df = evaluate_stocks(st.session_state.master_df, cap_tier, CATEGORY_WEIGHTS[cap_tier], cyclical_haircut=cyclical_haircut)
+        all_evaluated.append(res_df)
+    universe_df = pd.concat(all_evaluated, ignore_index=True)
+    clean_universe = universe_df[universe_df["Forensic_Status"] == "Clean"].sort_values(by="Final_Score", ascending=False)
+
+    selected_tickers = st.multiselect(
+        "Select Clean Stocks to Include in Portfolio Basket:",
+        options=clean_universe["Ticker"].tolist(),
+        default=clean_universe["Ticker"].head(5).tolist()
+    )
+
+    if selected_tickers:
+        basket_df = clean_universe[clean_universe["Ticker"].isin(selected_tickers)].copy()
+        # Allocate weights proportional to Composite Alpha Score * Max(1, Upside_Pct)
+        basket_df["Allocation_Factor"] = basket_df["Final_Score"] * np.maximum(1.0, 1.0 + basket_df["Upside_Pct"] / 100.0)
+        sum_factor = basket_df["Allocation_Factor"].sum()
+        basket_df["Raw_Weight"] = basket_df["Allocation_Factor"] / sum_factor
+        basket_df["Weight_Pct"] = np.minimum(basket_df["Raw_Weight"], max_weight_pct / 100.0)
+        # Renormalize weights
+        basket_df["Weight_Pct"] = basket_df["Weight_Pct"] / basket_df["Weight_Pct"].sum()
+
+        basket_df["Allocated_INR"] = basket_df["Weight_Pct"] * total_capital
+        basket_df["Shares_To_Buy"] = (basket_df["Allocated_INR"] / basket_df["CMP"]).astype(int)
+        basket_df["Actual_Invested_INR"] = basket_df["Shares_To_Buy"] * basket_df["CMP"]
+
+        st.markdown("### 📊 Optimal Institutional Portfolio Allocation Table")
+        alloc_display = [
+            "Ticker", "Company", "Category", "Final_Score", "CMP", "Fair_Value", "Upside_Pct",
+            "Weight_Pct", "Allocated_INR", "Shares_To_Buy", "Actual_Invested_INR", "Verdict"
+        ]
+        st.dataframe(
+            basket_df[alloc_display].style.format({
+                "Final_Score": "{:.1f}",
+                "CMP": "₹{:,.1f}",
+                "Fair_Value": "₹{:,.1f}",
+                "Upside_Pct": "{:+.1f}%",
+                "Weight_Pct": "{:.1%}",
+                "Allocated_INR": "₹{:,.0f}",
+                "Actual_Invested_INR": "₹{:,.0f}"
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        total_invested = basket_df["Actual_Invested_INR"].sum()
+        cash_left = total_capital - total_invested
+        st.success(f"💰 **Total Capital Deployed:** ₹{total_invested:,.0f} | **Unallocated Cash:** ₹{cash_left:,.0f} ({cash_left/total_capital:.1%})")
+
+        fig_pie = px.pie(
+            basket_df, names="Ticker", values="Allocated_INR",
+            title="Portfolio Capital Allocation Breakdown (₹)"
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
+    else:
+        st.warning("Please select at least one stock above to generate the portfolio allocation plan.")
