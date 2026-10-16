@@ -16,15 +16,15 @@ except ImportError:
 # 1. PAGE CONFIGURATION & HEADER
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="QUANT-APEX v4.0 | Bulk Screener, 3-Stage DCF & Backtesting Terminal",
+    page_title="QUANT-APEX v4.1 | Institutional Multi-Cap Screener, 3-Stage DCF & Backtesting Terminal",
     page_icon="🏛️",
     layout="wide"
 )
 
-st.title("🏛️ QUANT-APEX v4.0: Institutional Multi-Cap Screener, 3-Stage DCF & Backtesting Terminal")
+st.title("🏛️ QUANT-APEX v4.1: Institutional Multi-Cap Screener, 3-Stage DCF & Backtesting Terminal")
 st.markdown(
-    "**Screener.in Bulk CSV Auto-Mapper** | **10Y Damodaran ROIC-Fade DCF & BFSI Excess Return** | "
-    "**Portfolio Capital Allocator (₹)** | **Historical Walk-Forward Backtesting Engine vs. Nifty 50**"
+    "**Auto-Sanitized Multi-Cap Engine (USD/INR Fix + Cyclical Multiple Cap + Ind-AS 116 Lease Filter)** | "
+    "**10Y Damodaran ROIC-Fade DCF & BFSI Excess Return** | **Portfolio Capital Allocator (₹)** | **Walk-Forward Backtesting Lab**"
 )
 
 # ---------------------------------------------------------
@@ -39,11 +39,76 @@ CATEGORY_WEIGHTS = {
 DB_FILENAME = "quant_apex_db.csv"
 
 # ---------------------------------------------------------
-# 3. INITIAL CURATED DATASET & PERMANENT CSV DATABASE
+# 3. AUTO-SANITIZER FOR EXISTING & UPLOADED DATABASES
+# ---------------------------------------------------------
+def auto_sanitize_database(df):
+    """
+    Automatically repairs:
+    1. USD-reported financials (INFY, HCLTECH, WIPRO where Base_Rev_Cr < 2.5% of Market Cap)
+    2. Asset-light Capital Markets / Insurance misclassified as Lending BFSI (BSE, GROWW, ANGELONE, SBILIFE, HDFCLIFE)
+    3. Cyclical PSUs/Refiners/Shipping/Metals/Coal/Utilities peer multiple inflation
+    """
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+    non_lending_bfsi_tickers = {
+        "BSE", "MCX", "CDSL", "CAMS", "KFINTECH", "ANGELONE", "GROWW",
+        "NUVAMA", "SBILIFE", "HDFCLIFE", "ICICIPRULI", "LICI", "HDFCAMC", "NAM-INDIA"
+    }
+    cyc_keywords = [
+        "CEMENT", "STEEL", "METAL", "ALUMIN", "COPPER", "ZINC", "CHEM", "INFRA", "COMMODIT",
+        "SUGAR", "OIL", "REFIN", "GAS", "PETRO", "COAL", "MINING", "SHIPPING", "MARINE",
+        "FERTIL", "AGRI", "POWER", "UTILITIES", "PAPER", "TEXTILE", "TYRE"
+    ]
+
+    for idx, row in df.iterrows():
+        t_sym = str(row["Ticker"]).strip().upper()
+        sec_u = str(row["Sector"]).upper()
+
+        # 1. Re-verify Lending BFSI vs Asset-Light Financial
+        is_lending_bfsi = (
+            any(k in sec_u for k in ["BANK", "NBFC", "CREDIT", "MORTGAGE", "HOUSING FIN", "LENDING", "BFSI"])
+            and not any(x in sec_u for x in ["INSURANCE", "CAPITAL MARKET", "EXCHANGE", "ASSET MANAGEMENT", "BROK"])
+            and t_sym not in non_lending_bfsi_tickers
+        )
+        df.at[idx, "Is_BFSI"] = bool(is_lending_bfsi)
+
+        # 2. Re-verify Cyclical status & cap peer multiples + stage-1 growth
+        is_cyc = any(k in sec_u for k in cyc_keywords) or t_sym in {
+            "IOC", "ONGC", "BPCL", "HPCL", "CHENNPETRO", "MRPL", "COALINDIA",
+            "SCI", "GESHIP", "HINDALCO", "TATASTEEL", "JINDALSTEL", "VEDL", "HINDZINC", "NTPC", "POWERGRID", "GAIL"
+        }
+        df.at[idx, "Is_Cyclical"] = bool(is_cyc)
+
+        if is_cyc:
+            if float(row.get("Peer_EV_EBITDA", 22.0)) > 12.0:
+                df.at[idx, "Peer_EV_EBITDA"] = 8.5
+            if float(row.get("Peer_PE", 25.0)) > 14.0:
+                df.at[idx, "Peer_PE"] = 10.5
+            df.at[idx, "Proj_Growth_5Y"] = min(float(row.get("Proj_Growth_5Y", 12.0)), 14.0)
+            df.at[idx, "Term_Growth"] = min(float(row.get("Term_Growth", 5.0)), 4.5)
+
+        # 3. Auto-detect & repair USD-reported financials (Sales < 2.5% of Market Cap)
+        mcap_cr = float(row["CMP"]) * float(row["Shares_Cr"])
+        rev_cr = float(row["Base_Rev_Cr"])
+        if not is_lending_bfsi and mcap_cr > 500 and 0 < rev_cr < (mcap_cr * 0.025):
+            fx_mult = 86.0
+            df.at[idx, "Base_Rev_Cr"] = round(rev_cr * fx_mult, 2)
+            df.at[idx, "Base_EBITDA_Cr"] = round(float(row["Base_EBITDA_Cr"]) * fx_mult, 2)
+            df.at[idx, "Base_FCFF_Cr"] = round(float(row["Base_FCFF_Cr"]) * fx_mult, 2)
+            df.at[idx, "Total_Debt_Cr"] = round(float(row["Total_Debt_Cr"]) * fx_mult, 2)
+            df.at[idx, "Cash_Cr"] = round(float(row["Cash_Cr"]) * fx_mult, 2)
+            if float(row.get("BVPS", 0)) < (float(row["CMP"]) * 0.02):
+                df.at[idx, "BVPS"] = round(float(row["BVPS"]) * fx_mult, 2)
+
+    return df
+
+# ---------------------------------------------------------
+# 4. INITIAL CURATED DATASET & PERMANENT CSV DATABASE
 # ---------------------------------------------------------
 def get_initial_dataset():
     data = [
-        # ================= LARGE CAPS =================
         {"Ticker": "TCS", "Company": "Tata Consultancy Services", "Category": "Large-Cap", "Sector": "IT Services",
          "Is_BFSI": False, "Is_Cyclical": False,
          "CMP": 4120.0, "Shares_Cr": 361.8, "Base_Rev_Cr": 240893.0, "Base_EBITDA_Cr": 64200.0, "Base_FCFF_Cr": 44200.0,
@@ -81,14 +146,13 @@ def get_initial_dataset():
          "Is_BFSI": False, "Is_Cyclical": True,
          "CMP": 11250.0, "Shares_Cr": 28.87, "Base_Rev_Cr": 70908.0, "Base_EBITDA_Cr": 13450.0, "Base_FCFF_Cr": 8900.0,
          "Total_Debt_Cr": 10298.0, "Cash_Cr": 7830.0, "Beta": 0.89, "Cost_of_Debt": 7.6, "Tax_Rate": 25.5,
-         "Proj_Growth_5Y": 15.5, "Term_Growth": 5.5, "Peer_EV_EBITDA": 22.0, "Peer_PE": 35.0, "EPS": 265.0,
+         "Proj_Growth_5Y": 14.0, "Term_Growth": 4.5, "Peer_EV_EBITDA": 18.0, "Peer_PE": 28.0, "EPS": 265.0,
          "ROCE": 15.8, "ROE": 13.2, "OPM": 19.0, "Sales_CAGR_3Y": 16.5, "PAT_CAGR_3Y": 14.0,
          "CFO_EBITDA": 79.0, "Debt_Equity": 0.17, "Int_Coverage": 11.5, "Promoter_Hold": 59.96,
          "Promoter_Pledge": 0.0, "Debtor_Days": 22, "PEG": 2.1, "PE_vs_Median": 1.08,
          "ROA": 0.0, "NIM": 0.0, "NNPA": 0.0, "CAR": 0.0, "BVPS": 2085.0,
          "EMA_50": 11100.0, "EMA_200": 10450.0, "RSI_14": 55.4, "ADX_14": 21.0},
 
-        # ================= MID CAPS =================
         {"Ticker": "POLYCAB", "Company": "Polycab India Ltd", "Category": "Mid-Cap", "Sector": "Cables & FMEG",
          "Is_BFSI": False, "Is_Cyclical": False,
          "CMP": 6650.0, "Shares_Cr": 15.02, "Base_Rev_Cr": 18039.0, "Base_EBITDA_Cr": 2560.0, "Base_FCFF_Cr": 1820.0,
@@ -122,7 +186,6 @@ def get_initial_dataset():
          "ROA": 2.55, "NIM": 6.80, "NNPA": 1.15, "CAR": 18.6, "BVPS": 248.0,
          "EMA_50": 1410.0, "EMA_200": 1315.0, "RSI_14": 57.0, "ADX_14": 23.5},
 
-        # ================= SMALL CAPS =================
         {"Ticker": "CMSINFO", "Company": "CMS Info Systems Ltd", "Category": "Small-Cap", "Sector": "Cash Logistics & AIoT",
          "Is_BFSI": False, "Is_Cyclical": False,
          "CMP": 565.0, "Shares_Cr": 16.28, "Base_Rev_Cr": 2265.0, "Base_EBITDA_Cr": 595.0, "Base_FCFF_Cr": 390.0,
@@ -138,7 +201,7 @@ def get_initial_dataset():
          "Is_BFSI": False, "Is_Cyclical": True,
          "CMP": 3420.0, "Shares_Cr": 7.01, "Base_Rev_Cr": 5059.0, "Base_EBITDA_Cr": 910.0, "Base_FCFF_Cr": 610.0,
          "Total_Debt_Cr": 180.0, "Cash_Cr": 920.0, "Beta": 0.85, "Cost_of_Debt": 8.0, "Tax_Rate": 25.2,
-         "Proj_Growth_5Y": 18.0, "Term_Growth": 5.5, "Peer_EV_EBITDA": 24.0, "Peer_PE": 32.0, "EPS": 94.0,
+         "Proj_Growth_5Y": 15.0, "Term_Growth": 5.0, "Peer_EV_EBITDA": 18.0, "Peer_PE": 26.0, "EPS": 94.0,
          "ROCE": 27.0, "ROE": 21.5, "OPM": 17.8, "Sales_CAGR_3Y": 21.0, "PAT_CAGR_3Y": 25.0,
          "CFO_EBITDA": 73.0, "Debt_Equity": 0.06, "Int_Coverage": 24.0, "Promoter_Hold": 60.2,
          "Promoter_Pledge": 0.0, "Debtor_Days": 54, "PEG": 1.25, "PE_vs_Median": 1.00,
@@ -160,7 +223,7 @@ def get_initial_dataset():
          "Is_BFSI": False, "Is_Cyclical": True,
          "CMP": 410.0, "Shares_Cr": 12.0, "Base_Rev_Cr": 3200.0, "Base_EBITDA_Cr": 448.0, "Base_FCFF_Cr": 95.0,
          "Total_Debt_Cr": 2400.0, "Cash_Cr": 110.0, "Beta": 1.45, "Cost_of_Debt": 11.5, "Tax_Rate": 25.2,
-         "Proj_Growth_5Y": 12.0, "Term_Growth": 4.0, "Peer_EV_EBITDA": 10.0, "Peer_PE": 12.0, "EPS": 28.0,
+         "Proj_Growth_5Y": 12.0, "Term_Growth": 4.0, "Peer_EV_EBITDA": 8.5, "Peer_PE": 10.5, "EPS": 28.0,
          "ROCE": 18.0, "ROE": 19.0, "OPM": 14.0, "Sales_CAGR_3Y": 25.0, "PAT_CAGR_3Y": 28.0,
          "CFO_EBITDA": 22.0, "Debt_Equity": 1.65, "Int_Coverage": 1.8, "Promoter_Hold": 48.0,
          "Promoter_Pledge": 34.0, "Debtor_Days": 165, "PEG": 0.70, "PE_vs_Median": 0.65,
@@ -172,7 +235,9 @@ def get_initial_dataset():
 def load_master_database():
     if os.path.exists(DB_FILENAME):
         try:
-            return pd.read_csv(DB_FILENAME)
+            df_loaded = pd.read_csv(DB_FILENAME)
+            df_clean = auto_sanitize_database(df_loaded)
+            return df_clean
         except Exception:
             return get_initial_dataset()
     else:
@@ -191,19 +256,16 @@ def save_master_database(df):
 
 if "master_df" not in st.session_state:
     st.session_state.master_df = load_master_database()
+else:
+    st.session_state.master_df = auto_sanitize_database(st.session_state.master_df)
 
 # ---------------------------------------------------------
-# 4. TRACK 2: SCREENER.IN BULK CSV SMART AUTO-MAPPER
+# 5. TRACK 2: SCREENER.IN BULK CSV SMART AUTO-MAPPER (v4.1)
 # ---------------------------------------------------------
 def parse_screener_bulk_csv(uploaded_df):
-    """
-    Intelligently maps Screener.in exported CSV columns (or custom CSVs)
-    into the QUANT-APEX Institutional Schema without crashing on missing columns.
-    """
-    # If already in QUANT-APEX native format, return directly
     required_native = {"Ticker", "Company", "Category", "CMP", "ROCE", "ROE"}
     if required_native.issubset(set(uploaded_df.columns)):
-        return uploaded_df
+        return auto_sanitize_database(uploaded_df)
 
     col_map = {str(c).strip().lower(): c for c in uploaded_df.columns}
 
@@ -224,23 +286,15 @@ def parse_screener_bulk_csv(uploaded_df):
 
     company_s = get_text_series(["name", "company"], "Unknown Corp")
     ticker_s = get_text_series(["nse code", "ticker", "symbol", "bse code"], "")
-    # Fallback ticker from company name if NSE Code column wasn't exported
     ticker_s = np.where(ticker_s == "", company_s.str.upper().str.replace("[^A-Z0-9]", "", regex=True).str[:10], ticker_s.str.upper())
 
     sector_s = get_text_series(["industry", "sector"], "Industrial")
     cmp_s = np.maximum(get_col_series(["current price", "cmp", "price"], 500.0), 1.0)
     mcap_s = np.maximum(get_col_series(["market capitalization", "mar cap", "market cap"], 25000.0), 100.0)
 
-    cat_list = []
-    for mc in mcap_s:
-        if mc >= 106346:
-            cat_list.append("Large-Cap")
-        elif mc >= 33664:
-            cat_list.append("Mid-Cap")
-        else:
-            cat_list.append("Small-Cap")
-
+    cat_list = ["Large-Cap" if mc >= 106346 else ("Mid-Cap" if mc >= 33664 else "Small-Cap") for mc in mcap_s]
     shares_s = (mcap_s / cmp_s).round(2)
+
     roce_s = get_col_series(["return on capital employed", "roce"], 18.0)
     roe_s = get_col_series(["return on equity", "roe"], 15.0)
     opm_s = get_col_series(["opm", "operating profit margin"], 16.0)
@@ -278,15 +332,29 @@ def parse_screener_bulk_csv(uploaded_df):
 
     rows_out = []
     for i in range(len(uploaded_df)):
+        t_sym = str(ticker_s[i]).strip().upper()
         sec_upper = str(sector_s.iloc[i]).upper()
-        is_bfsi = any(k in sec_upper for k in ["BANK", "FINANC", "NBFC", "INSURANCE", "CREDIT"])
-        is_cyc = any(k in sec_upper for k in ["CEMENT", "STEEL", "METAL", "CHEM", "INFRA", "COMMODIT", "SUGAR"])
+
+        is_bfsi = (
+            any(k in sec_upper for k in ["BANK", "NBFC", "CREDIT", "MORTGAGE", "HOUSING FIN", "FINANCIAL"])
+            and not any(x in sec_upper for x in ["INSURANCE", "CAPITAL MARKET", "EXCHANGE", "ASSET MANAGEMENT", "BROK"])
+            and t_sym not in {"BSE", "MCX", "CDSL", "CAMS", "KFINTECH", "ANGELONE", "GROWW", "NUVAMA", "SBILIFE", "HDFCLIFE", "ICICIPRULI", "LICI"}
+        )
+
+        is_cyc = any(k in sec_upper for k in [
+            "CEMENT", "STEEL", "METAL", "ALUMIN", "COPPER", "ZINC", "CHEM", "INFRA", "COMMODIT",
+            "SUGAR", "OIL", "REFIN", "GAS", "PETRO", "COAL", "MINING", "SHIPPING", "MARINE",
+            "FERTIL", "AGRI", "POWER", "UTILITIES", "PAPER", "TEXTILE", "TYRE"
+        ])
+
+        peer_ev_mult = 8.5 if is_cyc else 21.0
+        peer_pe_mult = 10.5 if is_cyc else 24.0
 
         rows_out.append({
-            "Ticker": str(ticker_s[i]),
+            "Ticker": t_sym,
             "Company": str(company_s.iloc[i]),
             "Category": cat_list[i],
-            "Sector": "BFSI - Financial" if is_bfsi else str(sector_s.iloc[i]),
+            "Sector": "BFSI - Lending" if is_bfsi else str(sector_s.iloc[i]),
             "Is_BFSI": bool(is_bfsi),
             "Is_Cyclical": bool(is_cyc),
             "CMP": round(float(cmp_s.iloc[i]), 2),
@@ -296,13 +364,13 @@ def parse_screener_bulk_csv(uploaded_df):
             "Base_FCFF_Cr": round(float(fcff_s[i]), 2),
             "Total_Debt_Cr": round(float(debt_s.iloc[i]), 2),
             "Cash_Cr": round(float(cash_s.iloc[i]), 2),
-            "Beta": 0.95,
+            "Beta": 1.10 if is_cyc else 0.92,
             "Cost_of_Debt": 7.8,
             "Tax_Rate": 25.2,
-            "Proj_Growth_5Y": round(float(np.clip(sales_g_s.iloc[i], 8.0, 26.0)), 1),
-            "Term_Growth": 5.5,
-            "Peer_EV_EBITDA": 22.0,
-            "Peer_PE": 25.0,
+            "Proj_Growth_5Y": round(float(np.clip(sales_g_s.iloc[i], 8.0, 14.0 if is_cyc else 22.0)), 1),
+            "Term_Growth": 4.5 if is_cyc else 5.5,
+            "Peer_EV_EBITDA": peer_ev_mult,
+            "Peer_PE": peer_pe_mult,
             "EPS": round(float(eps_s.iloc[i]), 2),
             "ROCE": round(float(roce_s.iloc[i]), 1),
             "ROE": round(float(roe_s.iloc[i]), 1),
@@ -327,10 +395,10 @@ def parse_screener_bulk_csv(uploaded_df):
             "RSI_14": round(float(rsi_s.iloc[i]), 1),
             "ADX_14": round(float(adx_s.iloc[i]), 1)
         })
-    return pd.DataFrame(rows_out)
+    return auto_sanitize_database(pd.DataFrame(rows_out))
 
 # ---------------------------------------------------------
-# 5. LIVE NSE TICKER FETCHER (YFINANCE ENGINE)
+# 6. LIVE NSE TICKER FETCHER (WITH USD CURRENCY FIX)
 # ---------------------------------------------------------
 def fetch_live_nse_stock(ticker_symbol):
     clean_sym = ticker_symbol.strip().upper()
@@ -345,6 +413,8 @@ def fetch_live_nse_stock(ticker_symbol):
         raise ValueError(f"Could not fetch valid NSE data for {clean_sym}")
 
     cmp_val = float(info.get("currentPrice") or info.get("regularMarketPrice") or hist["Close"].iloc[-1])
+    fin_curr = str(info.get("financialCurrency", "INR")).upper()
+    fx_mult = 86.0 if fin_curr == "USD" else 1.0
 
     close_s = hist["Close"]
     ema50 = float(close_s.ewm(span=50, adjust=False).mean().iloc[-1])
@@ -372,26 +442,31 @@ def fetch_live_nse_stock(ticker_symbol):
     adx14 = float(dx.rolling(14).mean().iloc[-1]) if not np.isnan(dx.rolling(14).mean().iloc[-1]) else 22.0
 
     mcap_cr = float(info.get("marketCap", 50000 * 1e7)) / 1e7
-    if mcap_cr >= 106346:
-        cat = "Large-Cap"
-    elif mcap_cr >= 33664:
-        cat = "Mid-Cap"
-    else:
-        cat = "Small-Cap"
+    cat = "Large-Cap" if mcap_cr >= 106346 else ("Mid-Cap" if mcap_cr >= 33664 else "Small-Cap")
 
     shares_cr = round(mcap_cr / cmp_val, 2)
     sector = info.get("sector", "Industrial")
     industry = info.get("industry", "")
-    is_bfsi = any(k in (sector + " " + industry).upper() for k in ["BANK", "FINANCIAL", "CREDIT", "NBFC"])
-    is_cyclical = any(k in (sector + " " + industry).upper() for k in ["CEMENT", "STEEL", "METAL", "CHEMICAL", "COMMODIT", "CONSTRUCTION"])
+    sec_comb = (sector + " " + industry).upper()
+    t_base = clean_sym.replace(".NS", "").replace(".BO", "")
 
-    rev_cr = float(info.get("totalRevenue", mcap_cr * 0.4 * 1e7)) / 1e7
-    ebitda_cr = float(info.get("ebitda", rev_cr * 0.18 * 1e7)) / 1e7
+    is_bfsi = (
+        any(k in sec_comb for k in ["BANK", "NBFC", "CREDIT", "MORTGAGE", "HOUSING FIN"])
+        and not any(x in sec_comb for x in ["INSURANCE", "CAPITAL MARKET", "EXCHANGE", "ASSET MANAGEMENT", "BROK"])
+        and t_base not in {"BSE", "MCX", "CDSL", "CAMS", "KFINTECH", "ANGELONE", "GROWW", "NUVAMA", "SBILIFE", "HDFCLIFE"}
+    )
+    is_cyclical = any(k in sec_comb for k in [
+        "CEMENT", "STEEL", "METAL", "ALUMIN", "CHEM", "COMMODIT", "CONSTRUCTION",
+        "OIL", "REFIN", "GAS", "COAL", "MINING", "SHIPPING", "MARINE", "FERTIL", "POWER", "UTILITIES"
+    ])
+
+    rev_cr = (float(info.get("totalRevenue", mcap_cr * 0.4 * 1e7) or 0) * fx_mult) / 1e7
+    ebitda_cr = (float(info.get("ebitda", rev_cr * 0.18 * 1e7) or 0) * fx_mult) / 1e7
     fcf_raw = info.get("freeCashflow")
-    fcff_cr = (float(fcf_raw) / 1e7) if fcf_raw and fcf_raw > 0 else round(ebitda_cr * 0.62, 2)
+    fcff_cr = ((float(fcf_raw) * fx_mult) / 1e7) if fcf_raw and fcf_raw > 0 else round(ebitda_cr * 0.62, 2)
 
-    debt_cr = float(info.get("totalDebt", 0.0)) / 1e7
-    cash_cr = float(info.get("totalCash", 0.0)) / 1e7
+    debt_cr = (float(info.get("totalDebt", 0.0) or 0.0) * fx_mult) / 1e7
+    cash_cr = (float(info.get("totalCash", 0.0) or 0.0) * fx_mult) / 1e7
     roe_pct = float(info.get("returnOnEquity", 0.16) or 0.16) * 100
     roa_pct = float(info.get("returnOnAssets", 0.02) or 0.02) * 100
     opm_pct = float(info.get("operatingMargins", 0.18) or 0.18) * 100
@@ -399,16 +474,16 @@ def fetch_live_nse_stock(ticker_symbol):
     pat_g = float(info.get("earningsGrowth", 0.16) or 0.16) * 100
     de_ratio = float(info.get("debtToEquity", 15.0) or 15.0) / 100.0
     prom_hold = float(info.get("heldPercentInsiders", 0.52) or 0.52) * 100
-    bvps = float(info.get("bookValue", cmp_val * 0.25) or (cmp_val * 0.25))
+    bvps = float(info.get("bookValue", cmp_val * 0.25) or (cmp_val * 0.25)) * (fx_mult if float(info.get("bookValue", 100) or 100) < cmp_val * 0.02 else 1.0)
     eps_val = float(info.get("trailingEps", cmp_val / 25.0) or (cmp_val / 25.0))
     pe_val = cmp_val / max(eps_val, 1.0)
     peg_val = round(pe_val / max(pat_g, 8.0), 2)
 
     return {
-        "Ticker": clean_sym.replace(".NS", "").replace(".BO", ""),
+        "Ticker": t_base,
         "Company": info.get("longName", clean_sym),
         "Category": cat,
-        "Sector": "BFSI - Financial" if is_bfsi else sector,
+        "Sector": "BFSI - Lending" if is_bfsi else (industry or sector),
         "Is_BFSI": is_bfsi,
         "Is_Cyclical": is_cyclical,
         "CMP": round(cmp_val, 2),
@@ -421,10 +496,10 @@ def fetch_live_nse_stock(ticker_symbol):
         "Beta": round(float(info.get("beta", 0.95) or 0.95), 2),
         "Cost_of_Debt": 7.8,
         "Tax_Rate": 25.2,
-        "Proj_Growth_5Y": round(np.clip(rev_g, 8.0, 26.0), 1),
-        "Term_Growth": 5.5,
-        "Peer_EV_EBITDA": 22.0,
-        "Peer_PE": 25.0,
+        "Proj_Growth_5Y": round(np.clip(rev_g, 8.0, 14.0 if is_cyclical else 22.0), 1),
+        "Term_Growth": 4.5 if is_cyclical else 5.5,
+        "Peer_EV_EBITDA": 8.5 if is_cyclical else 21.0,
+        "Peer_PE": 10.5 if is_cyclical else 24.0,
         "EPS": round(eps_val, 2),
         "ROCE": round(roe_pct * 1.15, 1),
         "ROE": round(roe_pct, 1),
@@ -451,7 +526,7 @@ def fetch_live_nse_stock(ticker_symbol):
     }
 
 # ---------------------------------------------------------
-# 6. DAMODARAN ROIC-REINVESTMENT FADE VALUATION ENGINE
+# 7. DAMODARAN ROIC-REINVESTMENT FADE VALUATION ENGINE (v4.1)
 # ---------------------------------------------------------
 def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=None, custom_tg=None, cyclical_haircut_pct=0.0):
     mcap_cr = row["CMP"] * row["Shares_Cr"]
@@ -465,7 +540,7 @@ def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=
     kd_post_tax = row["Cost_of_Debt"] * (1.0 - row["Tax_Rate"] / 100.0)
     computed_disc = ke if row["Is_BFSI"] else (we * ke + wd * kd_post_tax)
 
-    disc_rate = custom_wacc if custom_wacc is not None else max(round(computed_disc, 2), 9.0)
+    disc_rate = custom_wacc if custom_wacc is not None else max(round(computed_disc, 2), 9.5 if not row["Is_Cyclical"] else 11.0)
     g_stage1 = custom_g5 if custom_g5 is not None else row["Proj_Growth_5Y"]
     tg = custom_tg if custom_tg is not None else row["Term_Growth"]
 
@@ -483,7 +558,9 @@ def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=
 
     if not row["Is_BFSI"]:
         haircut_mult = (1.0 - cyclical_haircut_pct / 100.0) if row["Is_Cyclical"] else 1.0
-        curr_fcff = row["Base_FCFF_Cr"] * haircut_mult
+        # Cap Base FCFF at 80% of Base EBITDA to prevent one-off working capital spikes from inflating DCF
+        safe_base_fcff = min(max(row["Base_FCFF_Cr"], row["Base_EBITDA_Cr"] * 0.25), row["Base_EBITDA_Cr"] * 0.80)
+        curr_fcff = safe_base_fcff * haircut_mult
         curr_rev = row["Base_Rev_Cr"]
 
         for yr in range(1, 11):
@@ -495,7 +572,7 @@ def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=
                 g_yr = g1_dec - fade_step * (g1_dec - tg_dec)
 
             curr_rev = curr_rev * (1.0 + g_yr)
-            curr_fcff = curr_fcff * (1.0 + g_yr) * (1.0 + (0.04 * fade_step))
+            curr_fcff = curr_fcff * (1.0 + g_yr) * (1.0 + (0.03 * fade_step))
             pv_cf = curr_fcff / ((1.0 + r_dec) ** yr)
 
             growth_schedule.append(round(g_yr * 100, 2))
@@ -509,18 +586,18 @@ def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=
         pv_term_val = round(term_val / ((1.0 + r_dec) ** 10), 2)
 
         enterprise_val = round(sum_pv_10y + pv_term_val, 2)
-        equity_val = max(0.0, round(enterprise_val + row["Cash_Cr"] - row["Total_Debt_Cr"], 2))
+        equity_val = max(mcap_cr * 0.15, round(enterprise_val + row["Cash_Cr"] - row["Total_Debt_Cr"], 2))
         dcf_fair_value = round(equity_val / row["Shares_Cr"], 2)
 
         rel_ev = row["Base_EBITDA_Cr"] * haircut_mult * row["Peer_EV_EBITDA"]
-        rel_eq_ev = max(0.0, (rel_ev + row["Cash_Cr"] - row["Total_Debt_Cr"]) / row["Shares_Cr"])
-        rel_pe_val = row["EPS"] * row["Peer_PE"]
-        relative_fair_value = round(0.6 * rel_eq_ev + 0.4 * rel_pe_val, 2)
+        rel_eq_ev = max(row["CMP"] * 0.15, (rel_ev + row["Cash_Cr"] - row["Total_Debt_Cr"]) / row["Shares_Cr"])
+        rel_pe_val = max(0.0, row["EPS"]) * row["Peer_PE"]
+        relative_fair_value = round(0.6 * rel_eq_ev + 0.4 * rel_pe_val, 2) if row["EPS"] > 0 else round(rel_eq_ev, 2)
         model_label = "10Y Damodaran ROIC-Fade FCFF DCF"
 
     else:
-        curr_bv = row["BVPS"]
-        roe_dec = row["ROE"] / 100.0
+        curr_bv = max(row["BVPS"], row["CMP"] * 0.15)
+        roe_dec = np.clip(row["ROE"] / 100.0, 0.08, 0.24)
         retention_ratio = 0.78
 
         for yr in range(1, 11):
@@ -549,15 +626,16 @@ def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=
         term_val = round(term_er / (r_dec - tg_dec), 2)
         pv_term_val = round(term_val / ((1.0 + r_dec) ** 10), 2)
 
-        dcf_fair_value = max(row["BVPS"] * 0.8, round(row["BVPS"] + sum_pv_10y + pv_term_val, 2))
+        dcf_fair_value = max(curr_bv * 0.5, round(row["BVPS"] + sum_pv_10y + pv_term_val, 2))
         enterprise_val = round(dcf_fair_value * row["Shares_Cr"], 2)
         equity_val = enterprise_val
 
-        justified_pb = max(1.0, (roe_dec - tg_dec) / max(r_dec - tg_dec, 0.03))
-        relative_fair_value = round(0.5 * (row["BVPS"] * justified_pb) + 0.5 * (row["EPS"] * row["Peer_PE"]), 2)
+        justified_pb = np.clip((roe_dec - tg_dec) / max(r_dec - tg_dec, 0.03), 0.8, 3.5)
+        rel_pe_val = max(0.0, row["EPS"]) * min(row["Peer_PE"], 18.0)
+        relative_fair_value = round(0.5 * (row["BVPS"] * justified_pb) + 0.5 * rel_pe_val, 2) if row["EPS"] > 0 else round(row["BVPS"] * justified_pb, 2)
         model_label = "10Y BFSI Excess Return (Residual Income) Model"
 
-    blended_fair_value = round(0.70 * dcf_fair_value + 0.30 * relative_fair_value, 2)
+    blended_fair_value = max(round(row["CMP"] * 0.20, 2), round(0.70 * dcf_fair_value + 0.30 * relative_fair_value, 2))
     bear_case_fv = round(blended_fair_value * 0.82, 2)
     bull_case_fv = round(blended_fair_value * 1.20, 2)
     upside_pct = round(((blended_fair_value - row["CMP"]) / row["CMP"]) * 100.0, 1)
@@ -599,7 +677,7 @@ def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=
     }
 
 # ---------------------------------------------------------
-# 7. DUAL-REGIME SCORING & EVALUATION ENGINE
+# 8. DUAL-REGIME SCORING & EVALUATION ENGINE (v4.1)
 # ---------------------------------------------------------
 def calculate_pillar_and_tech_scores(row):
     if not row["Is_BFSI"]:
@@ -695,8 +773,11 @@ def evaluate_stocks(df, selected_cap, weights, cyclical_haircut=0.0):
         if not row["Is_BFSI"]:
             if row["CFO_EBITDA"] < 35.0:
                 reasons.append(f"Weak CFO/EBITDA ({row['CFO_EBITDA']}%)")
-            if row["Debt_Equity"] > 1.8:
-                reasons.append(f"High D/E ({row['Debt_Equity']}x)")
+            sec_u = str(row["Sector"]).upper()
+            # Ind-AS 116 Retail/Restaurant lease & Auto-NBFC subsidiary allowance (3.5x D/E)
+            de_limit = 3.5 if any(k in sec_u for k in ["RESTAURANT", "LUXURY", "RETAIL", "AUTO", "CAPITAL", "ASSET", "BROK"]) else 1.8
+            if row["Debt_Equity"] > de_limit:
+                reasons.append(f"High D/E ({row['Debt_Equity']}x > {de_limit}x)")
         else:
             if row["NNPA"] > 2.5:
                 reasons.append(f"High Net NPA ({row['NNPA']}%)")
@@ -735,15 +816,10 @@ def evaluate_stocks(df, selected_cap, weights, cyclical_haircut=0.0):
     return df_cap
 
 # ---------------------------------------------------------
-# 8. HISTORICAL WALK-FORWARD BACKTESTING ENGINE (VS NIFTY 50)
+# 9. HISTORICAL WALK-FORWARD BACKTESTING ENGINE (VS NIFTY 50)
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
 def run_historical_backtest(selected_rows_json, weights_list, years_lookback=3):
-    """
-    Fetches historical daily closing prices from yfinance for the selected top-ranked stocks
-    and compares cumulative performance against Nifty 50 (^NSEI).
-    Includes a deterministic fundamental-drift fallback if yfinance rate-limits on cloud.
-    """
     sel_df = pd.read_json(io.StringIO(selected_rows_json))
     tickers = sel_df["Ticker"].tolist()
     n_days = int(years_lookback * 252)
@@ -775,7 +851,6 @@ def run_historical_backtest(selected_rows_json, weights_list, years_lookback=3):
         except Exception:
             pass
 
-    # Deterministic fallback for any ticker missing from Yahoo Finance Cloud response
     rng_bench = np.random.default_rng(42)
     market_daily_ret = rng_bench.normal(0.125 / 252.0, 0.145 / np.sqrt(252.0), size=len(dates))
 
@@ -788,7 +863,6 @@ def run_historical_backtest(selected_rows_json, weights_list, years_lookback=3):
         if t not in price_matrix.columns or price_matrix[t].isna().mean() > 0.25:
             seed_val = sum(ord(ch) for ch in t) + int(row["Final_Score"] * 10)
             rng_s = np.random.default_rng(seed_val)
-            # Fundamental expected drift derived from historical PAT growth, ROCE & quality score
             annual_alpha = ((row["Final_Score"] - 60.0) / 100.0) * 0.16 + (row["PAT_CAGR_3Y"] - 12.0) / 100.0 * 0.25
             annual_drift = np.clip(0.125 + annual_alpha, 0.05, 0.32)
             idiosync_vol = 0.22 / np.sqrt(252.0)
@@ -866,7 +940,7 @@ def run_historical_backtest(selected_rows_json, weights_list, years_lookback=3):
     }
 
 # ---------------------------------------------------------
-# 9. 5-TAB INSTITUTIONAL EXCEL (.XLSX) GENERATOR
+# 10. 5-TAB INSTITUTIONAL EXCEL (.XLSX) GENERATOR
 # ---------------------------------------------------------
 def generate_v4_institutional_excel(stock_row, val_res, weights):
     output = io.BytesIO()
@@ -884,7 +958,7 @@ def generate_v4_institutional_excel(stock_row, val_res, weights):
     ws1 = wb.add_worksheet("Executive_IC_Memo")
     ws1.set_column("A:A", 38)
     ws1.set_column("B:D", 22)
-    ws1.merge_range("A1:D1", f"QUANT-APEX v4.0 IC MEMO: {stock_row['Company']} ({stock_row['Ticker']})", title_fmt)
+    ws1.merge_range("A1:D1", f"QUANT-APEX v4.1 IC MEMO: {stock_row['Company']} ({stock_row['Ticker']})", title_fmt)
 
     summary_rows = [
         ("Market-Cap Tier & Regime", f"{stock_row['Category']} | {'BFSI Mode' if stock_row['Is_BFSI'] else 'Corporate Mode'}", tag_fmt),
@@ -1024,11 +1098,10 @@ def generate_v4_institutional_excel(stock_row, val_res, weights):
     return output.getvalue()
 
 # ---------------------------------------------------------
-# 10. SIDEBAR: BULK SCREENER CSV PIPELINE & LIVE FETCHER
+# 11. SIDEBAR: BULK SCREENER CSV PIPELINE & LIVE FETCHER
 # ---------------------------------------------------------
 st.sidebar.header("📂 Track 2: Screener.in Bulk CSV Pipeline")
 
-# Generate a ready-to-use Screener.in format template CSV
 sample_screener_template = pd.DataFrame([
     {"Name": "Bharat Electronics", "NSE Code": "BEL", "Industry": "Defense Electronics", "Current Price": 292.0, "Market Capitalization": 213500.0,
      "Return on capital employed": 34.5, "Return on equity": 26.2, "OPM": 24.8, "Sales growth 3Years": 16.5, "Profit growth 3Years": 22.8,
@@ -1039,17 +1112,7 @@ sample_screener_template = pd.DataFrame([
      "Return on capital employed": 36.2, "Return on equity": 29.8, "OPM": 20.4, "Sales growth 3Years": 33.5, "Profit growth 3Years": 41.0,
      "Sales": 4872.0, "Operating profit": 994.0, "Free cash flow 3years": 1950.0, "Debt": 240.0, "Cash Equivalents": 980.0,
      "Debt to equity": 0.11, "Interest Coverage Ratio": 18.5, "Promoter holding": 39.5, "Pledged percentage": 0.0, "Debtor days": 54,
-     "PEG Ratio": 1.55, "EPS": 24.5, "Book value": 82.0, "DMA 50": 1450.0, "DMA 200": 1390.0, "RSI": 57.2},
-    {"Name": "Apar Industries", "NSE Code": "APARINDS", "Industry": "Power Conductors & Oils", "Current Price": 9250.0, "Market Capitalization": 37150.0,
-     "Return on capital employed": 38.0, "Return on equity": 24.5, "OPM": 10.5, "Sales growth 3Years": 36.0, "Profit growth 3Years": 52.0,
-     "Sales": 16153.0, "Operating profit": 1696.0, "Free cash flow 3years": 2100.0, "Debt": 390.0, "Cash Equivalents": 620.0,
-     "Debt to equity": 0.10, "Interest Coverage Ratio": 6.8, "Promoter holding": 57.8, "Pledged percentage": 0.0, "Debtor days": 74,
-     "PEG Ratio": 0.92, "EPS": 205.0, "Book value": 965.0, "DMA 50": 9100.0, "DMA 200": 8250.0, "RSI": 61.0},
-    {"Name": "eClerx Services", "NSE Code": "ECLERX", "Industry": "KPO & Analytics", "Current Price": 2890.0, "Market Capitalization": 14100.0,
-     "Return on capital employed": 31.8, "Return on equity": 25.0, "OPM": 26.5, "Sales growth 3Years": 23.0, "Profit growth 3Years": 22.0,
-     "Sales": 2926.0, "Operating profit": 775.0, "Free cash flow 3years": 1560.0, "Debt": 180.0, "Cash Equivalents": 840.0,
-     "Debt to equity": 0.08, "Interest Coverage Ratio": 28.0, "Promoter holding": 53.8, "Pledged percentage": 0.0, "Debtor days": 59,
-     "PEG Ratio": 1.22, "EPS": 106.0, "Book value": 445.0, "DMA 50": 2810.0, "DMA 200": 2540.0, "RSI": 62.4}
+     "PEG Ratio": 1.55, "EPS": 24.5, "Book value": 82.0, "DMA 50": 1450.0, "DMA 200": 1390.0, "RSI": 57.2}
 ])
 
 st.sidebar.download_button(
@@ -1073,9 +1136,10 @@ if bulk_csv_file is not None and st.sidebar.button("⚡ Process & Rank Bulk Scre
             final_df = pd.concat([curr_df, mapped_df], ignore_index=True)
         else:
             final_df = mapped_df
+        final_df = auto_sanitize_database(final_df)
         st.session_state.master_df = final_df
         save_master_database(final_df)
-        st.sidebar.success(f"✅ Successfully mapped & ranked {len(mapped_df)} stocks from CSV!")
+        st.sidebar.success(f"✅ Successfully mapped, sanitized & ranked {len(mapped_df)} stocks!")
         st.rerun()
     except Exception as e:
         st.sidebar.error(f"CSV Parse Error: {e}")
@@ -1093,7 +1157,7 @@ if st.sidebar.button("🚀 Fetch Live NSE Data & Save", use_container_width=True
                 new_stock = fetch_live_nse_stock(live_ticker_input)
                 df_curr = st.session_state.master_df
                 df_curr = df_curr[df_curr["Ticker"] != new_stock["Ticker"]]
-                updated_df = pd.concat([df_curr, pd.DataFrame([new_stock])], ignore_index=True)
+                updated_df = auto_sanitize_database(pd.concat([df_curr, pd.DataFrame([new_stock])], ignore_index=True))
                 st.session_state.master_df = updated_df
                 save_master_database(updated_df)
                 st.sidebar.success(f"✅ Saved {new_stock['Ticker']} ({new_stock['Category']}) @ ₹{new_stock['CMP']}!")
@@ -1106,6 +1170,13 @@ cyclical_haircut = st.sidebar.slider(
     "Cyclical Peak-Margin Haircut (%)",
     min_value=0.0, max_value=25.0, value=10.0, step=2.5
 )
+if st.sidebar.button("🛠️ Auto-Repair & Sanitize Current DB", use_container_width=True):
+    repaired_df = auto_sanitize_database(st.session_state.master_df)
+    st.session_state.master_df = repaired_df
+    save_master_database(repaired_df)
+    st.sidebar.success("✅ Repaired USD/INR, Cyclicals & Lease D/E across all stocks!")
+    st.rerun()
+
 if st.sidebar.button("🔄 Reset Database to Default 11 Stocks", use_container_width=True):
     df_init = get_initial_dataset()
     st.session_state.master_df = df_init
@@ -1113,7 +1184,7 @@ if st.sidebar.button("🔄 Reset Database to Default 11 Stocks", use_container_w
     st.rerun()
 
 # ---------------------------------------------------------
-# 11. MAIN UI: 3 INSTITUTIONAL TABS
+# 12. MAIN UI: 3 INSTITUTIONAL TABS
 # ---------------------------------------------------------
 tab_rank, tab_alloc, tab_backtest = st.tabs([
     "🏆 1. Quant Ranking & 3-Stage DCF Terminal",
@@ -1230,7 +1301,7 @@ with tab_rank:
     st.download_button(
         label=f"📥 Download {selected_ticker} 5-Tab Institutional Research Excel (.xlsx)",
         data=excel_data,
-        file_name=f"{selected_ticker}_QUANT_APEX_v4_Institutional_Model.xlsx",
+        file_name=f"{selected_ticker}_QUANT_APEX_v4_1_Institutional_Model.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary",
         use_container_width=True
@@ -1271,7 +1342,7 @@ with tab_rank:
         st.plotly_chart(fig_ff, use_container_width=True)
 
 # ---------------------------------------------------------
-# 12. TAB 2: PORTFOLIO CAPITAL ALLOCATOR (₹)
+# 13. TAB 2: PORTFOLIO CAPITAL ALLOCATOR (₹)
 # ---------------------------------------------------------
 all_evaluated_list = []
 for cap_tier in ["Large-Cap", "Mid-Cap", "Small-Cap"]:
@@ -1294,7 +1365,7 @@ with tab_alloc:
 
     if selected_tickers:
         basket_df = clean_universe[clean_universe["Ticker"].isin(selected_tickers)].copy()
-        basket_df["Allocation_Factor"] = basket_df["Final_Score"] * np.maximum(1.0, 1.0 + basket_df["Upside_Pct"] / 100.0)
+        basket_df["Allocation_Factor"] = basket_df["Final_Score"] * np.clip(1.0 + basket_df["Upside_Pct"] / 200.0, 1.0, 1.5)
         basket_df["Raw_Weight"] = basket_df["Allocation_Factor"] / basket_df["Allocation_Factor"].sum()
         basket_df["Weight_Pct"] = np.minimum(basket_df["Raw_Weight"], max_weight_pct / 100.0)
         basket_df["Weight_Pct"] = basket_df["Weight_Pct"] / basket_df["Weight_Pct"].sum()
@@ -1329,7 +1400,7 @@ with tab_alloc:
         st.plotly_chart(fig_pie, use_container_width=True)
 
 # ---------------------------------------------------------
-# 13. TAB 3: WALK-FORWARD HISTORICAL BACKTESTING LAB
+# 14. TAB 3: WALK-FORWARD HISTORICAL BACKTESTING LAB
 # ---------------------------------------------------------
 with tab_backtest:
     st.subheader("📈 Institutional Walk-Forward Backtesting Engine (QUANT-APEX Basket vs. Nifty 50 Index)")
@@ -1365,7 +1436,6 @@ with tab_backtest:
         with st.spinner(f"Running {bt_years}-Year Institutional Backtest against Nifty 50..."):
             bt_res = run_historical_backtest(bt_selected_df.to_json(), w_bt, years_lookback=bt_years)
 
-        # Backtest KPI Scorecard
         bk1, bk2, bk3, bk4, bk5, bk6 = st.columns(6)
         bk1.metric("QUANT-APEX CAGR", f"{bt_res['port_cagr']:+.2f}%", f"{bt_res['alpha']:+.2f}% Alpha vs Nifty")
         bk2.metric("Nifty 50 Benchmark CAGR", f"{bt_res['bench_cagr']:+.2f}%")
@@ -1374,7 +1444,6 @@ with tab_backtest:
         bk5.metric("Max Drawdown (Portfolio)", f"{bt_res['max_dd_port']:.2f}%", f"Nifty DD: {bt_res['max_dd_bench']:.2f}%")
         bk6.metric("Monthly Outperformance", f"{bt_res['win_months_pct']:.1f}%", "Months Beating Nifty")
 
-        # Plot 1: Equity Curve (₹1,00,000 Initial Capital) & Drawdown Chart
         ch_left, ch_right = st.columns([1.35, 1])
 
         with ch_left:
@@ -1414,8 +1483,8 @@ with tab_backtest:
             bt_res["contrib_df"].style.format({
                 "Quant Score": "{:.1f}",
                 "Portfolio Weight (%)": "{:.1f}%",
-                f"{bt_years}Y Cumulative Return (%)": "{:+.1f}%",
-                f"{bt_years}Y Annualized CAGR (%)": "{:+.1f}%"
+                f"{years_lookback if 'years_lookback' in locals() else bt_years}Y Cumulative Return (%)": "{:+.1f}%",
+                f"{years_lookback if 'years_lookback' in locals() else bt_years}Y Annualized CAGR (%)": "{:+.1f}%"
             }),
             use_container_width=True,
             hide_index=True
