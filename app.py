@@ -1,3 +1,7 @@
+# =========================================================
+# QUANT-APEX: PART 1 OF 2 (SECTIONS 1 TO 8)
+# Copy-paste this first, then paste PART 2 right below it!
+# =========================================================
 import io
 import os
 import streamlit as st
@@ -16,19 +20,19 @@ except ImportError:
 # 1. PAGE CONFIGURATION & CLEAN INSTITUTIONAL HEADER
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="QUANT-APEX v6.0 | Institutional Multi-Cap & 4-Model Valuation Terminal",
+    page_title="QUANT-APEX | Institutional 8-Regime Valuation & Quant Terminal",
     page_icon="🏛️",
     layout="wide"
 )
 
-st.title("🏛️ QUANT-APEX v6.0: Institutional Multi-Cap Quant & 4-Model Valuation Terminal")
+st.title("🏛️ QUANT-APEX: Institutional Multi-Cap Quant & 8-Regime Valuation Terminal")
 st.markdown(
-    "**Market-Cap Adaptive 4-Model Valuation Triangulation (Damodaran DCF · Greenwald EPV · 3Y Exit EV/EBITDA · GARP Forward P/E)** · "
-    "**BFSI Excess Return & Justified P/B** · **Portfolio Capital Allocator (₹)** · **Walk-Forward Nifty 50 Backtesting**"
+    "**8-Category Adaptive Valuation Engine (Main + Supporting Method Matrix)** · "
+    "**Multi-Cap 100-Point Quant Ranking** · **Portfolio Capital Allocator (₹)** · **Walk-Forward Nifty 50 Backtesting**"
 )
 
 # ---------------------------------------------------------
-# 2. MASTER WEIGHTS BY MARKET CAP (SCORING & 4-MODEL VALUATION)
+# 2. MASTER WEIGHTS BY MARKET CAP
 # ---------------------------------------------------------
 CATEGORY_WEIGHTS = {
     "Large-Cap": {"Profitability": 30, "Growth": 15, "CashFlow_BS": 20, "Governance": 15, "Valuation": 20},
@@ -36,25 +40,12 @@ CATEGORY_WEIGHTS = {
     "Small-Cap": {"Profitability": 15, "Growth": 25, "CashFlow_BS": 25, "Governance": 25, "Valuation": 10}
 }
 
-# Market-Cap Specific Valuation Weights: (Model1_DCF, Model2_EPV_Floor, Model3_3Y_Exit_EV_EBITDA, Model4_GARP_Forward_PE)
-VALUATION_MODEL_WEIGHTS = {
-    "Large-Cap": (0.45, 0.20, 0.20, 0.15), # 45% DCF + 20% EPV + 20% 3Y EV/EBITDA + 15% GARP P/E
-    "Mid-Cap":   (0.20, 0.15, 0.35, 0.30), # 20% DCF + 15% EPV + 35% 3Y EV/EBITDA + 30% GARP P/E
-    "Small-Cap": (0.10, 0.25, 0.35, 0.30)  # 90% Non-DCF! (10% DCF + 25% EPV Floor + 35% 3Y EV/EBITDA + 30% GARP P/E)
-}
-
 DB_FILENAME = "quant_apex_db.csv"
 
 # ---------------------------------------------------------
-# 3. AUTOMATIC DATABASE SANITIZER & GLITCH UNCORRUPTOR (v6.0)
+# 3. AUTOMATIC DATABASE SANITIZER & GLITCH UNCORRUPTOR
 # ---------------------------------------------------------
 def auto_sanitize_database(df):
-    """
-    1. Automatically divides out any legacy 86x or 7,396x (86^2) multiplier corruption on EBITDA, FCFF, Revenue, Debt & Cash.
-    2. Reconstructs Base_Rev_Cr from Base_EBITDA_Cr / OPM if 'Sales' was previously mis-mapped to 'Sales growth 3Years'.
-    3. Separates Lending BFSI (Banks/NBFCs) from Asset-Light Exchanges, Brokers, AMCs & Insurers.
-    4. Assigns realistic sector multiples for Cyclical vs Non-Cyclical industries.
-    """
     if df is None or df.empty:
         return df
 
@@ -107,18 +98,16 @@ def auto_sanitize_database(df):
         debt_cr = float(row.get("Total_Debt_Cr", 0.0))
         cash_cr = float(row.get("Cash_Cr", 0.0))
 
-        # Uncorrupt any 86x or 7,396x (86^2) multiplied financials
-        while ebitda_cr > (mcap_cr * 0.55) and mcap_cr > 50:
+        while abs(ebitda_cr) > (mcap_cr * 0.55) and mcap_cr > 50:
             ebitda_cr /= 86.0
             fcff_cr /= 86.0
             rev_cr /= 86.0
             debt_cr /= 86.0
             cash_cr /= 86.0
 
-        while fcff_cr > (mcap_cr * 0.45) and mcap_cr > 50:
+        while abs(fcff_cr) > (mcap_cr * 0.45) and mcap_cr > 50:
             fcff_cr /= 86.0
 
-        # Fix USD-reported IT giants ONLY if EBITDA is tiny (< 0.8% of Market Cap)
         if t_sym in {"INFY", "HCLTECH", "WIPRO"} and 0 < ebitda_cr < (mcap_cr * 0.008):
             ebitda_cr *= 86.0
             fcff_cr *= 86.0
@@ -126,19 +115,21 @@ def auto_sanitize_database(df):
             debt_cr *= 86.0
             cash_cr *= 86.0
 
-        # Reconstruct Revenue if it was corrupted by 'Sales growth 3Years'
-        if not is_lending_bfsi and (rev_cr <= ebitda_cr * 1.05 or rev_cr < mcap_cr * 0.03):
-            rev_cr = ebitda_cr / opm_dec if ebitda_cr > 0 else mcap_cr * 0.45
+        if not is_lending_bfsi and (rev_cr <= abs(ebitda_cr) * 1.05 or rev_cr < mcap_cr * 0.03):
+            rev_cr = abs(ebitda_cr) / opm_dec if abs(ebitda_cr) > 0 else mcap_cr * 0.45
 
         eps_val = float(row.get("EPS", 0.0))
-        if eps_val > cmp_val * 0.30:
-            while eps_val > cmp_val * 0.30:
+        if abs(eps_val) > cmp_val * 0.30:
+            while abs(eps_val) > cmp_val * 0.30:
                 eps_val /= 86.0
             df.at[idx, "EPS"] = round(eps_val, 2)
 
         df.at[idx, "Base_Rev_Cr"] = round(rev_cr, 2)
         df.at[idx, "Base_EBITDA_Cr"] = round(ebitda_cr, 2)
-        df.at[idx, "Base_FCFF_Cr"] = round(min(max(fcff_cr, ebitda_cr * 0.25), ebitda_cr * 0.75), 2)
+        if ebitda_cr > 0:
+            df.at[idx, "Base_FCFF_Cr"] = round(min(max(fcff_cr, ebitda_cr * 0.25), ebitda_cr * 0.75), 2)
+        else:
+            df.at[idx, "Base_FCFF_Cr"] = round(fcff_cr, 2)
         df.at[idx, "Total_Debt_Cr"] = round(debt_cr, 2)
         df.at[idx, "Cash_Cr"] = round(cash_cr, 2)
 
@@ -287,7 +278,6 @@ def parse_screener_bulk_csv(uploaded_df):
     fcf_1y_s = get_col_series(["free cash flow", "base_fcff_cr"], np.nan)
 
     fcff_s = np.where(~np.isnan(fcf_3y_s), fcf_3y_s / 3.0, np.where(~np.isnan(fcf_1y_s), fcf_1y_s, ebitda_s * 0.62))
-    fcff_s = np.clip(fcff_s, ebitda_s * 0.25, ebitda_s * 0.75)
 
     debt_s = get_col_series(["debt", "total debt", "total_debt_cr"], 0.0)
     cash_s = get_col_series(["cash equivalents", "cash", "cash_cr"], mcap_s * 0.04)
@@ -503,23 +493,138 @@ def fetch_live_nse_stock(ticker_symbol):
     }
 
 # ---------------------------------------------------------
-# 7. INSTITUTIONAL 4-MODEL VALUATION TRIANGULATION ENGINE (v6.0)
+# 7. 8-CATEGORY VALUATION REGIME CLASSIFIER & ENGINE
 # ---------------------------------------------------------
-def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=None, custom_tg=None, cyclical_haircut_pct=0.0):
+def classify_stock_regime(row):
+    t_sym = str(row["Ticker"]).strip().upper()
+    comp_u = str(row["Company"]).upper()
+    sec_u = str(row["Sector"]).upper()
     cat = str(row.get("Category", "Large-Cap"))
+    cmp_val = max(float(row.get("CMP", 100.0)), 1.0)
+    shares_cr = max(float(row.get("Shares_Cr", 1.0)), 0.05)
+    mcap_cr = cmp_val * shares_cr
+    eps_val = float(row.get("EPS", 0.0))
+    opm_val = float(row.get("OPM", 15.0))
+    roe_val = float(row.get("ROE", 15.0))
+    roce_val = float(row.get("ROCE", 15.0))
+    sales_g = max(float(row.get("Sales_CAGR_3Y", 12.0)), float(row.get("Proj_Growth_5Y", 12.0)))
+    de_val = float(row.get("Debt_Equity", 0.2))
+    ic_val = float(row.get("Int_Coverage", 5.0))
+
+    holding_tickers = {
+        "BAJAJHLDNG", "CHOLAHLDNG", "JINDALPOLY", "PILANIINVS", "KAMA", "TATAINVEST",
+        "MAHSCOOTER", "GODREJIND", "GRASIM", "BALMLAWRIE", "SUNDARAM", "TVSHLTD", "BBTC"
+    }
+
+    # 7. Banks and NBFCs
+    if bool(row.get("Is_BFSI", False)):
+        return {
+            "Regime": "Banks and NBFCs",
+            "Main_Method_Name": "Residual income / justified P/B",
+            "Supp_Method_Name": "ROE, asset quality",
+            "Main_Weight": 0.65,
+            "Supp_Weight": 0.35
+        }
+
+    # 8. Holding companies
+    if t_sym in holding_tickers or any(k in sec_u for k in ["HOLDING", "CONGLOMERATE"]) or ("HOLDING" in comp_u and not bool(row.get("Is_BFSI", False))):
+        return {
+            "Regime": "Holding companies",
+            "Main_Method_Name": "Sum-of-the-Parts (SOTP)",
+            "Supp_Method_Name": "Holding-company discount",
+            "Main_Weight": 0.60,
+            "Supp_Weight": 0.40
+        }
+
+    # 6. Distressed / loss-making
+    if eps_val <= 0.0 or opm_val <= 1.5 or roe_val <= 0.0 or (de_val > 2.2 and ic_val < 1.5):
+        return {
+            "Regime": "Distressed / loss-making",
+            "Main_Method_Name": "Asset recovery value",
+            "Supp_Method_Name": "Survival and dilution analysis",
+            "Main_Weight": 0.60,
+            "Supp_Weight": 0.40
+        }
+
+    # 4. High-growth, low-profit
+    if sales_g >= 18.0 and (opm_val < 10.0 or roe_val < 11.0 or roce_val < 12.0):
+        return {
+            "Regime": "High-growth, low-profit",
+            "Main_Method_Name": "Forecast-based DCF",
+            "Supp_Method_Name": "EV/Sales",
+            "Main_Weight": 0.55,
+            "Supp_Weight": 0.45
+        }
+
+    # 5. Penny / micro-cap, profitable
+    if mcap_cr < 2000.0 or (mcap_cr < 3500.0 and cmp_val < 50.0):
+        return {
+            "Regime": "Penny / micro-cap, profitable",
+            "Main_Method_Name": "Conservative DCF",
+            "Supp_Method_Name": "P/B, peer multiples",
+            "Main_Weight": 0.55,
+            "Supp_Weight": 0.45
+        }
+
+    # 1. Large-Cap, stable cash flow
+    if cat == "Large-Cap":
+        return {
+            "Regime": "Large-Cap, stable cash flow",
+            "Main_Method_Name": "FCFF DCF",
+            "Supp_Method_Name": "P/E, EV/EBITDA",
+            "Main_Weight": 0.60,
+            "Supp_Weight": 0.40
+        }
+
+    # 2. Mid-Cap, growing earnings
+    if cat == "Mid-Cap":
+        return {
+            "Regime": "Mid-Cap, growing earnings",
+            "Main_Method_Name": "DCF + peer multiples",
+            "Supp_Method_Name": "Scenario analysis",
+            "Main_Weight": 0.60,
+            "Supp_Weight": 0.40
+        }
+
+    # 3. Small-Cap, profitable
+    return {
+        "Regime": "Small-Cap, profitable",
+        "Main_Method_Name": "Conservative DCF",
+        "Supp_Method_Name": "Peer P/E, EV/EBITDA",
+        "Main_Weight": 0.50,
+        "Supp_Weight": 0.50
+    }
+
+def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=None, custom_tg=None, cyclical_haircut_pct=0.0):
+    reg_info = classify_stock_regime(row)
+    regime = reg_info["Regime"]
+    w_main = reg_info["Main_Weight"]
+    w_supp = reg_info["Supp_Weight"]
+
     cmp_val = max(float(row["CMP"]), 1.0)
     shares_cr = max(float(row["Shares_Cr"]), 0.05)
     mcap_cr = cmp_val * shares_cr
     debt_cr = float(row["Total_Debt_Cr"])
     cash_cr = float(row["Cash_Cr"])
+    net_cash_cr = cash_cr - debt_cr
     total_cap = mcap_cr + debt_cr
 
     we = 1.0 if row["Is_BFSI"] else (mcap_cr / total_cap if total_cap > 0 else 1.0)
     wd = 0.0 if row["Is_BFSI"] else (debt_cr / total_cap if total_cap > 0 else 0.0)
 
-    # Size & Illiquidity Premium by Market-Cap Tier
-    size_prem = 0.0 if cat == "Large-Cap" else (0.75 if cat == "Mid-Cap" else 1.75)
-    min_wacc_floor = 9.5 if cat == "Large-Cap" else (10.5 if cat == "Mid-Cap" else 11.5)
+    if regime == "Large-Cap, stable cash flow":
+        size_prem, min_wacc_floor = 0.0, 9.5
+    elif regime == "Mid-Cap, growing earnings":
+        size_prem, min_wacc_floor = 0.75, 10.5
+    elif regime in ["Small-Cap, profitable", "High-growth, low-profit", "Holding companies"]:
+        size_prem, min_wacc_floor = 1.50, 11.5
+    elif regime == "Penny / micro-cap, profitable":
+        size_prem, min_wacc_floor = 2.50, 13.0
+    elif regime == "Distressed / loss-making":
+        size_prem, min_wacc_floor = 3.50, 14.5
+    else:
+        size_prem, min_wacc_floor = 0.50, 10.5
+
     if row["Is_Cyclical"]:
         min_wacc_floor += 0.75
 
@@ -531,6 +636,11 @@ def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=
     g_stage1 = custom_g5 if custom_g5 is not None else float(row["Proj_Growth_5Y"])
     tg = min(custom_tg if custom_tg is not None else float(row["Term_Growth"]), 6.0)
 
+    if regime in ["Small-Cap, profitable", "Penny / micro-cap, profitable"]:
+        tg = min(tg, 4.5 if regime == "Small-Cap, profitable" else 3.5)
+        if custom_g5 is None:
+            g_stage1 = min(g_stage1, 16.5 if regime == "Small-Cap, profitable" else 12.5)
+
     if disc_rate <= tg + 1.75:
         tg = round(disc_rate - 2.25, 2)
 
@@ -538,96 +648,35 @@ def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=
     g1_dec = g_stage1 / 100.0
     tg_dec = tg / 100.0
 
+    haircut_mult = (1.0 - cyclical_haircut_pct / 100.0) if row["Is_Cyclical"] else 1.0
+    ebitda_base = float(row["Base_EBITDA_Cr"])
+    fcff_base = float(row["Base_FCFF_Cr"])
+    rev_base = max(float(row["Base_Rev_Cr"]), mcap_cr * 0.15)
+
+    while abs(ebitda_base) > (mcap_cr * 0.55) and mcap_cr > 50:
+        ebitda_base /= 86.0
+        fcff_base /= 86.0
+        rev_base /= 86.0
+
+    bvps_val = max(float(row["BVPS"]), cmp_val * 0.12)
+    eps_val = float(row["EPS"])
+    if abs(eps_val) > cmp_val * 0.30:
+        eps_val = cmp_val / max(float(row["Peer_PE"]), 12.0)
+
     growth_schedule = []
     cf_schedule = []
     pv_schedule = []
     metric1_schedule = []
 
-    if not row["Is_BFSI"]:
-        haircut_mult = (1.0 - cyclical_haircut_pct / 100.0) if row["Is_Cyclical"] else 1.0
-        ebitda_base = float(row["Base_EBITDA_Cr"])
-        fcff_base = float(row["Base_FCFF_Cr"])
-        rev_base = float(row["Base_Rev_Cr"])
-
-        while ebitda_base > (mcap_cr * 0.55) and mcap_cr > 50:
-            ebitda_base /= 86.0
-            fcff_base /= 86.0
-            rev_base /= 86.0
-
-        ebit_base = ebitda_base * 0.85 * haircut_mult
-        nopat_base = ebit_base * (1.0 - float(row["Tax_Rate"]) / 100.0)
-        safe_base_fcff = min(max(fcff_base * haircut_mult, nopat_base * 0.55), ebitda_base * haircut_mult * 0.75)
-
-        roic_init = np.clip(float(row["ROCE"]) / 100.0, 0.12, 0.50)
-        roic_term = max(r_dec + 0.035, min(roic_init, 0.26))
-
-        # --- MODEL 1: 10Y DAMODARAN 3-STAGE FCFF DCF (MID-YEAR DISCOUNTING) ---
-        curr_fcff = safe_base_fcff
-        curr_nopat = nopat_base
-        curr_rev = max(rev_base, ebitda_base * 1.5)
-
-        for yr in range(1, 11):
-            fade_step = 0.0 if yr <= 5 else (yr - 5) / 5.0
-            g_yr = g1_dec - fade_step * (g1_dec - tg_dec)
-            curr_rev = curr_rev * (1.0 + g_yr)
-            curr_nopat = curr_nopat * (1.0 + g_yr)
-            curr_fcff = curr_fcff * (1.0 + g_yr) * (1.0 + (0.02 * fade_step))
-            pv_cf = curr_fcff / ((1.0 + r_dec) ** (yr - 0.5))
-
-            growth_schedule.append(round(g_yr * 100, 2))
-            metric1_schedule.append(round(curr_rev, 2))
-            cf_schedule.append(round(curr_fcff, 2))
-            pv_schedule.append(round(pv_cf, 2))
-
-        sum_pv_10y = round(sum(pv_schedule), 2)
-        term_reinv_rate = np.clip(tg_dec / roic_term, 0.15, 0.45)
-        term_fcff_nopat = (curr_nopat * (1.0 + tg_dec)) * (1.0 - term_reinv_rate)
-        term_cf = max(cf_schedule[-1] * (1.0 + tg_dec), term_fcff_nopat)
-        term_val = round(term_cf / (r_dec - tg_dec), 2)
-        pv_term_val = round(term_val / ((1.0 + r_dec) ** 10.0), 2)
-
-        enterprise_val = round(sum_pv_10y + pv_term_val, 2)
-        equity_val = max(0.0, round(enterprise_val + cash_cr - debt_cr, 2))
-        m1_dcf_fv = round(equity_val / shares_cr, 2)
-
-        # --- MODEL 2: BRUCE GREENWALD EARNINGS POWER VALUE (EPV) + FRANCHISE MOAT ---
-        nopat_3y = nopat_base * ((1.0 + g1_dec) ** 3)
-        moat_spread = max(0.0, roic_init - r_dec)
-        franchise_mult = np.clip(1.0 + (moat_spread * 3.5), 1.0, 1.80)
-        epv_ev = (nopat_3y / r_dec) * franchise_mult
-        m2_epv_fv = round(max(0.0, (epv_ev + cash_cr - debt_cr) / shares_cr), 2)
-
-        # --- MODEL 3: 3-YEAR FORWARD DISCOUNTED EXIT EV/EBITDA MULTIPLE ---
-        ebitda_3y = (ebitda_base * haircut_mult) * ((1.0 + g1_dec) ** 3)
-        exit_ev_3y = ebitda_3y * float(row["Peer_EV_EBITDA"])
-        pv_exit_ev = exit_ev_3y / ((1.0 + r_dec) ** 2.5)
-        m3_ev_ebitda_fv = round(max(0.0, (pv_exit_ev + cash_cr - debt_cr) / shares_cr), 2)
-
-        # --- MODEL 4: PETER LYNCH / GARP 2Y FORWARD JUSTIFIED P/E MODEL ---
-        eps_clean = max(0.0, float(row["EPS"]))
-        if eps_clean > cmp_val * 0.30:
-            eps_clean = cmp_val / max(float(row["Peer_PE"]), 12.0)
-        eps_2y = eps_clean * ((1.0 + g1_dec) ** 2)
-        justified_pe = np.clip(9.0 + 0.70 * g_stage1 + 0.25 * max(0.0, float(row["ROCE"]) - 15.0), 8.0, float(row["Peer_PE"]) * 1.25)
-        m4_garp_pe_fv = round((eps_2y * justified_pe) / ((1.0 + (ke / 100.0)) ** 1.5), 2) if eps_clean > 0 else m3_ev_ebitda_fv
-
-        w_m = VALUATION_MODEL_WEIGHTS.get(cat, (0.20, 0.20, 0.30, 0.30))
-        blended_fair_value = round(
-            w_m[0] * m1_dcf_fv + w_m[1] * m2_epv_fv + w_m[2] * m3_ev_ebitda_fv + w_m[3] * m4_garp_pe_fv, 2
-        )
-        relative_fair_value = round(0.50 * m3_ev_ebitda_fv + 0.50 * m4_garp_pe_fv, 2)
-        model_label = f"4-Model Triangulated ({int(w_m[0]*100)}% DCF · {int(w_m[1]*100)}% EPV · {int(w_m[2]*100)}% Exit EV/EBITDA · {int(w_m[3]*100)}% GARP P/E)"
-
-    else:
-        # --- BFSI 4-MODEL TRIANGULATION (EXCESS RETURN + JUSTIFIED P/B + FORWARD P/B + GARP P/E) ---
-        curr_bv = max(float(row["BVPS"]), cmp_val * 0.15)
+    if regime == "Banks and NBFCs":
+        curr_bv = bvps_val
         roe_dec = np.clip(float(row["ROE"]) / 100.0, 0.08, 0.24)
         retention_ratio = 0.78
 
         for yr in range(1, 11):
             fade_step = 0.0 if yr <= 5 else (yr - 5) / 5.0
             g_yr = g1_dec - fade_step * (g1_dec - tg_dec)
-            target_roe = max(r_dec + 0.025, roe_dec * 0.85)
+            target_roe = max(r_dec + 0.03, roe_dec * 0.88)
             yr_roe = roe_dec - fade_step * (roe_dec - target_roe)
 
             eps_yr = curr_bv * yr_roe
@@ -645,30 +694,133 @@ def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=
         term_val = round(term_er / (r_dec - tg_dec), 2)
         pv_term_val = round(term_val / ((1.0 + r_dec) ** 10.0), 2)
 
-        m1_dcf_fv = max(curr_bv * 0.5, round(float(row["BVPS"]) + sum_pv_10y + pv_term_val, 2))
-        justified_pb = np.clip((roe_dec - tg_dec) / max(r_dec - tg_dec, 0.03), 0.75, 3.2)
-        m2_epv_fv = round(float(row["BVPS"]) * justified_pb, 2)
+        residual_income_fv = max(bvps_val * 0.5, round(bvps_val + sum_pv_10y + pv_term_val, 2))
+        bv_2y = bvps_val * ((1.0 + roe_dec * retention_ratio) ** 2)
+        justified_pb = np.clip((roe_dec - tg_dec) / max(r_dec - tg_dec, 0.035), 0.80, 3.2)
+        just_pb_fv = round((bv_2y * justified_pb) / ((1.0 + r_dec) ** 1.0), 2)
 
-        bvps_2y = float(row["BVPS"]) * ((1.0 + roe_dec * retention_ratio) ** 2)
-        m3_ev_ebitda_fv = round((bvps_2y * justified_pb) / ((1.0 + r_dec) ** 1.5), 2)
+        main_fv = round(0.50 * residual_income_fv + 0.50 * just_pb_fv, 2)
 
-        eps_clean = max(0.0, float(row["EPS"]))
-        eps_2y = eps_clean * ((1.0 + g1_dec * 0.85) ** 2)
-        bank_pe = np.clip(8.0 + (float(row["ROE"]) - 10.0) * 0.85, 7.0, 20.0)
-        m4_garp_pe_fv = round((eps_2y * bank_pe) / ((1.0 + r_dec) ** 1.5), 2) if eps_clean > 0 else m2_epv_fv
+        nnpa_val = float(row.get("NNPA", 0.5))
+        asset_quality_mult = np.clip(1.08 - (nnpa_val * 0.12), 0.70, 1.08)
+        eps_2y = max(0.0, eps_val) * ((1.0 + g1_dec * 0.85) ** 2)
+        bank_pe = np.clip(8.5 + (float(row["ROE"]) - 10.0) * 0.85, 7.0, 19.0) * asset_quality_mult
+        supp_fv = round((eps_2y * bank_pe) / ((1.0 + r_dec) ** 1.5), 2) if eps_val > 0 else round(just_pb_fv * asset_quality_mult, 2)
 
-        w_m = (0.40, 0.25, 0.15, 0.20)
-        blended_fair_value = round(
-            w_m[0] * m1_dcf_fv + w_m[1] * m2_epv_fv + w_m[2] * m3_ev_ebitda_fv + w_m[3] * m4_garp_pe_fv, 2
-        )
-        relative_fair_value = round(0.50 * m2_epv_fv + 0.50 * m4_garp_pe_fv, 2)
-        enterprise_val = round(blended_fair_value * shares_cr, 2)
+        enterprise_val = round((w_main * main_fv + w_supp * supp_fv) * shares_cr, 2)
         equity_val = enterprise_val
-        model_label = "BFSI 4-Model (40% Excess Return · 25% Justified P/B · 15% Forward P/B · 20% GARP P/E)"
 
-    # Safety floor so distressed loss-making companies never show negative or zero Fair Value
-    if blended_fair_value < cmp_val * 0.25:
-        blended_fair_value = round(cmp_val * 0.35, 2)
+    else:
+        ebit_base = max(0.0, ebitda_base * 0.85 * haircut_mult)
+        nopat_base = ebit_base * (1.0 - float(row["Tax_Rate"]) / 100.0)
+
+        if regime == "High-growth, low-profit":
+            curr_rev = rev_base
+            init_opm = np.clip(float(row["OPM"]) / 100.0, 0.03, 0.12)
+            target_opm = 0.15
+            for yr in range(1, 11):
+                fade_step = 0.0 if yr <= 5 else (yr - 5) / 5.0
+                g_yr = g1_dec - fade_step * (g1_dec - tg_dec)
+                curr_rev = curr_rev * (1.0 + g_yr)
+                conv_opm = init_opm + (yr / 10.0) * (target_opm - init_opm)
+                ebitda_yr = curr_rev * conv_opm
+                fcff_yr = ebitda_yr * 0.58
+                pv_cf = fcff_yr / ((1.0 + r_dec) ** (yr - 0.5))
+                growth_schedule.append(round(g_yr * 100, 2))
+                metric1_schedule.append(round(curr_rev, 2))
+                cf_schedule.append(round(fcff_yr, 2))
+                pv_schedule.append(round(pv_cf, 2))
+        else:
+            cons_haircut = 0.85 if regime in ["Small-Cap, profitable", "Penny / micro-cap, profitable"] else 1.0
+            safe_base_fcff = max(
+                rev_base * 0.03,
+                min(max(fcff_base * haircut_mult, nopat_base * 0.55), max(ebitda_base * haircut_mult * 0.75, rev_base * 0.05))
+            ) * cons_haircut
+            curr_fcff = safe_base_fcff
+            curr_rev = rev_base
+
+            for yr in range(1, 11):
+                fade_step = 0.0 if yr <= 5 else (yr - 5) / 5.0
+                g_yr = g1_dec - fade_step * (g1_dec - tg_dec)
+                curr_rev = curr_rev * (1.0 + g_yr)
+                curr_fcff = curr_fcff * (1.0 + g_yr) * (1.0 + (0.02 * fade_step))
+                pv_cf = curr_fcff / ((1.0 + r_dec) ** (yr - 0.5))
+                growth_schedule.append(round(g_yr * 100, 2))
+                metric1_schedule.append(round(curr_rev, 2))
+                cf_schedule.append(round(curr_fcff, 2))
+                pv_schedule.append(round(pv_cf, 2))
+
+        sum_pv_10y = round(sum(pv_schedule), 2)
+        roic_term = max(r_dec + 0.035, min(np.clip(float(row["ROCE"]) / 100.0, 0.14, 0.45), 0.26))
+        term_reinv_rate = np.clip(tg_dec / roic_term, 0.15, 0.45)
+        term_nopat_cf = (nopat_base * ((1.0 + g1_dec) ** 5) * ((1.0 + tg_dec) ** 6)) * (1.0 - term_reinv_rate)
+        term_cf = max(cf_schedule[-1] * (1.0 + tg_dec), term_nopat_cf)
+        term_val = round(term_cf / (r_dec - tg_dec), 2)
+        pv_term_val = round(term_val / ((1.0 + r_dec) ** 10.0), 2)
+
+        enterprise_val = round(sum_pv_10y + pv_term_val, 2)
+        equity_val = max(0.0, round(enterprise_val + net_cash_cr, 2))
+        base_dcf_fv = round(equity_val / shares_cr, 2)
+
+        ebitda_3y = max(0.0, ebitda_base * haircut_mult) * ((1.0 + g1_dec) ** 3)
+        pv_exit_ev = (ebitda_3y * float(row["Peer_EV_EBITDA"])) / ((1.0 + r_dec) ** 2.5)
+        peer_ev_ebitda_fv = round(max(0.0, (pv_exit_ev + net_cash_cr) / shares_cr), 2)
+
+        eps_clean = max(0.0, eps_val)
+        eps_2y = eps_clean * ((1.0 + g1_dec) ** 2)
+        justified_pe = np.clip(9.0 + 0.70 * g_stage1 + 0.25 * max(0.0, float(row["ROCE"]) - 15.0), 8.0, float(row["Peer_PE"]) * 1.25)
+        peer_pe_fv = round((eps_2y * justified_pe) / ((1.0 + (ke / 100.0)) ** 1.5), 2) if eps_clean > 0 else peer_ev_ebitda_fv
+        combined_peer_mult_fv = round(0.50 * peer_pe_fv + 0.50 * peer_ev_ebitda_fv, 2)
+
+        if regime == "Large-Cap, stable cash flow":
+            main_fv = base_dcf_fv
+            supp_fv = combined_peer_mult_fv
+
+        elif regime == "Mid-Cap, growing earnings":
+            main_fv = round(0.50 * base_dcf_fv + 0.50 * combined_peer_mult_fv, 2)
+            bear_s = main_fv * 0.78
+            base_s = main_fv * 1.00
+            bull_s = main_fv * 1.28
+            supp_fv = round(0.25 * bear_s + 0.50 * base_s + 0.25 * bull_s, 2)
+
+        elif regime == "Small-Cap, profitable":
+            main_fv = base_dcf_fv
+            supp_fv = combined_peer_mult_fv
+
+        elif regime == "High-growth, low-profit":
+            main_fv = base_dcf_fv
+            rev_2y = rev_base * ((1.0 + g1_dec) ** 2)
+            target_ev_sales = np.clip(1.2 + (g_stage1 / 12.0), 1.5, 4.5)
+            pv_ev_sales = (rev_2y * target_ev_sales) / ((1.0 + r_dec) ** 1.5)
+            supp_fv = round(max(cmp_val * 0.25, (pv_ev_sales + net_cash_cr) / shares_cr), 2)
+
+        elif regime == "Penny / micro-cap, profitable":
+            main_fv = base_dcf_fv
+            micro_pb_mult = np.clip(float(row["ROE"]) / 10.0, 0.8, 2.5)
+            pb_fv = bvps_val * micro_pb_mult
+            supp_fv = round(0.50 * pb_fv + 0.50 * combined_peer_mult_fv, 2)
+
+        elif regime == "Distressed / loss-making":
+            tangible_book_recovery = bvps_val * 0.75
+            ev_asset_recovery = max(0.0, (rev_base * 0.35 + cash_cr * 0.90 - debt_cr * 1.0) / shares_cr)
+            main_fv = round(max(cmp_val * 0.20, 0.60 * tangible_book_recovery + 0.40 * ev_asset_recovery), 2)
+
+            dilution_factor = 0.70
+            survival_prob = 0.65 if float(row["Debt_Equity"]) < 1.5 else 0.45
+            turnaround_val = max(bvps_val * 0.90, (rev_base * 0.55) / shares_cr)
+            supp_fv = round(max(cmp_val * 0.15, turnaround_val * dilution_factor * survival_prob), 2)
+
+        elif regime == "Holding companies":
+            core_op_ev = max(0.0, ebitda_base * 10.0)
+            investment_book_cr = max(bvps_val * shares_cr * 1.35, mcap_cr * 1.15)
+            sotp_equity_cr = max(mcap_cr * 0.50, core_op_ev + investment_book_cr + net_cash_cr)
+            main_fv = round(sotp_equity_cr / shares_cr, 2)
+            holdco_discount = 0.40
+            supp_fv = round(main_fv * (1.0 - holdco_discount), 2)
+
+    blended_fair_value = round(w_main * main_fv + w_supp * supp_fv, 2)
+    if blended_fair_value < cmp_val * 0.18:
+        blended_fair_value = round(cmp_val * 0.25, 2)
 
     bear_case_fv = round(blended_fair_value * 0.82, 2)
     bull_case_fv = round(blended_fair_value * 1.20, 2)
@@ -684,8 +836,14 @@ def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=
         val_tag = "🔴 OVERVALUED"
 
     return {
-        "Model_Type": model_label,
-        "Weights_Tuple": w_m,
+        "Regime": regime,
+        "Main_Method_Name": reg_info["Main_Method_Name"],
+        "Supp_Method_Name": reg_info["Supp_Method_Name"],
+        "Main_Weight": w_main,
+        "Supp_Weight": w_supp,
+        "Main_FV": main_fv,
+        "Supp_FV": supp_fv,
+        "Model_Type": f"{regime} ({reg_info['Main_Method_Name']} + {reg_info['Supp_Method_Name']})",
         "Ke": round(ke, 2),
         "Kd_PostTax": round(kd_post_tax, 2),
         "We_Pct": round(we * 100, 1),
@@ -702,12 +860,8 @@ def run_3stage_valuation(row, rf_rate=6.8, erp=5.5, custom_g5=None, custom_wacc=
         "PV_Terminal_Value": pv_term_val,
         "Enterprise_Value": enterprise_val,
         "Equity_Value": equity_val,
-        "M1_DCF_FV": m1_dcf_fv,
-        "M2_EPV_FV": m2_epv_fv,
-        "M3_EV_EBITDA_FV": m3_ev_ebitda_fv,
-        "M4_GARP_PE_FV": m4_garp_pe_fv,
-        "DCF_Intrinsic_Value": m1_dcf_fv,
-        "Relative_Fair_Value": relative_fair_value,
+        "DCF_Intrinsic_Value": main_fv,
+        "Relative_Fair_Value": supp_fv,
         "Fair_Value": blended_fair_value,
         "Bear_Case_FV": bear_case_fv,
         "Bull_Case_FV": bull_case_fv,
@@ -799,6 +953,9 @@ def evaluate_stocks(df, selected_cap, weights, cyclical_haircut=0.0):
     ).round(1)
 
     val_results = df_cap.apply(lambda r: run_3stage_valuation(r, cyclical_haircut_pct=cyclical_haircut), axis=1)
+    df_cap["Valuation_Regime"] = [res["Regime"] for res in val_results]
+    df_cap["Main_Method"] = [res["Main_Method_Name"] for res in val_results]
+    df_cap["Supporting_Method"] = [res["Supp_Method_Name"] for res in val_results]
     df_cap["Fair_Value"] = [res["Fair_Value"] for res in val_results]
     df_cap["DCF_Intrinsic_Value"] = [res["DCF_Intrinsic_Value"] for res in val_results]
     df_cap["Relative_Fair_Value"] = [res["Relative_Fair_Value"] for res in val_results]
@@ -852,6 +1009,11 @@ def evaluate_stocks(df, selected_cap, weights, cyclical_haircut=0.0):
     df_cap = df_cap.sort_values(by=["Final_Score", "Fundamental_Score"], ascending=[False, False]).reset_index(drop=True)
     df_cap["Rank"] = [f"#{i+1}" for i in range(len(df_cap))]
     return df_cap
+# ================= END OF PART 1 =================
+# =========================================================
+# QUANT-APEX: PART 2 OF 2 (SECTIONS 9 TO 14)
+# Paste this right below '# ================= END OF PART 1 ================='
+# =========================================================
 
 # ---------------------------------------------------------
 # 9. HISTORICAL WALK-FORWARD BACKTESTING ENGINE (VS NIFTY 50)
@@ -978,9 +1140,9 @@ def run_historical_backtest(selected_rows_json, weights_list, years_lookback=3):
     }
 
 # ---------------------------------------------------------
-# 10. 5-TAB INSTITUTIONAL EXCEL (.XLSX) GENERATOR (v6.0)
+# 10. 5-TAB INSTITUTIONAL EXCEL (.XLSX) GENERATOR
 # ---------------------------------------------------------
-def generate_v6_institutional_excel(stock_row, val_res, weights):
+def generate_institutional_excel(stock_row, val_res, weights):
     output = io.BytesIO()
     writer = pd.ExcelWriter(output, engine="xlsxwriter")
     wb = writer.book
@@ -995,17 +1157,19 @@ def generate_v6_institutional_excel(stock_row, val_res, weights):
 
     ws1 = wb.add_worksheet("Executive_IC_Memo")
     ws1.set_column("A:A", 40)
-    ws1.set_column("B:D", 22)
-    ws1.merge_range("A1:D1", f"QUANT-APEX v6.0 IC MEMO: {stock_row['Company']} ({stock_row['Ticker']})", title_fmt)
+    ws1.set_column("B:D", 24)
+    ws1.merge_range("A1:D1", f"QUANT-APEX IC MEMO: {stock_row['Company']} ({stock_row['Ticker']})", title_fmt)
 
     summary_rows = [
-        ("Market-Cap Tier & Valuation Regime", f"{stock_row['Category']} | {val_res['Model_Type']}", tag_fmt),
+        ("Stock Category / Business Regime", val_res["Regime"], tag_fmt),
+        ("Main Valuation Method", val_res["Main_Method_Name"], tag_fmt),
+        ("Supporting Valuation Method", val_res["Supp_Method_Name"], tag_fmt),
         ("Composite Alpha Score (/100)", stock_row["Final_Score"], val_fmt),
         ("Fundamental Quality Score (/100)", stock_row["Fundamental_Score"], val_fmt),
         ("Technical Momentum Score (/100)", stock_row["Tech_Score"], val_fmt),
         ("Institutional Action Verdict", stock_row["Verdict"], tag_fmt),
         ("Current Market Price (CMP)", stock_row["CMP"], curr_fmt),
-        ("4-Model Triangulated Fair Value (₹)", val_res["Fair_Value"], curr_fmt),
+        ("Blended Fair Value (₹)", val_res["Fair_Value"], curr_fmt),
         ("Implied Margin of Safety / Upside (%)", val_res["Upside_Pct"] / 100.0, pct_fmt),
         ("Valuation Status", val_res["Valuation_Status"], tag_fmt)
     ]
@@ -1013,10 +1177,10 @@ def generate_v6_institutional_excel(stock_row, val_res, weights):
         ws1.write(f"A{r_i}", k, lbl_fmt)
         ws1.write(f"B{r_i}", v, f_style)
 
-    ws1.write("A13", "5-Pillar Fundamental Breakdown", sub_hdr_fmt)
-    ws1.write("B13", "Raw Score (/10)", sub_hdr_fmt)
-    ws1.write("C13", "Category Weight", sub_hdr_fmt)
-    ws1.write("D13", "Weighted Marks", sub_hdr_fmt)
+    ws1.write("A15", "5-Pillar Fundamental Breakdown", sub_hdr_fmt)
+    ws1.write("B15", "Raw Score (/10)", sub_hdr_fmt)
+    ws1.write("C15", "Category Weight", sub_hdr_fmt)
+    ws1.write("D15", "Weighted Marks", sub_hdr_fmt)
 
     pillars = [
         ("1. Profitability & Capital Moat", stock_row["P1_Raw"], weights["Profitability"]),
@@ -1025,27 +1189,27 @@ def generate_v6_institutional_excel(stock_row, val_res, weights):
         ("4. Governance & Forensics", stock_row["P4_Raw"], weights["Governance"]),
         ("5. Valuation Comfort & PEG", stock_row["P5_Raw"], weights["Valuation"]),
     ]
-    for idx, (p_name, p_raw, p_wt) in enumerate(pillars, start=14):
+    for idx, (p_name, p_raw, p_wt) in enumerate(pillars, start=16):
         ws1.write(f"A{idx}", p_name, lbl_fmt)
         ws1.write(f"B{idx}", p_raw, val_fmt)
         ws1.write(f"C{idx}", p_wt, val_fmt)
         ws1.write_formula(f"D{idx}", f"=(B{idx}/10)*C{idx}", val_fmt, (p_raw / 10.0) * p_wt)
 
-    ws1.write("A19", "Total Fundamental Score (/100)", sub_hdr_fmt)
-    ws1.write("B19", "", sub_hdr_fmt)
-    ws1.write_formula("C19", "=SUM(C14:C18)", sub_hdr_fmt, 100)
-    ws1.write_formula("D19", "=SUM(D14:D18)", curr_fmt, stock_row["Fundamental_Score"])
+    ws1.write("A21", "Total Fundamental Score (/100)", sub_hdr_fmt)
+    ws1.write("B21", "", sub_hdr_fmt)
+    ws1.write_formula("C21", "=SUM(C16:C20)", sub_hdr_fmt, 100)
+    ws1.write_formula("D21", "=SUM(D16:D20)", curr_fmt, stock_row["Fundamental_Score"])
 
-    ws2 = wb.add_worksheet("10Y_Damodaran_DCF")
+    ws2 = wb.add_worksheet("10Y_Projection_Schedule")
     ws2.set_column("A:A", 40)
     ws2.set_column("B:L", 16)
-    ws2.merge_range("A1:L1", f"10-YEAR MID-YEAR DAMODARAN VALUATION SCHEDULE — {stock_row['Ticker']}", title_fmt)
+    ws2.merge_range("A1:L1", f"10-YEAR VALUATION PROJECTION SCHEDULE ({val_res['Regime']}) — {stock_row['Ticker']}", title_fmt)
 
     ws2.write("A3", "Size-Adjusted Discount Rate (WACC / Ke %)", lbl_fmt)
     ws2.write("B3", val_res["WACC"] / 100.0, pct_fmt)
     ws2.write("A4", "Stage-1 High Growth Rate (Years 1-5 %)", lbl_fmt)
     ws2.write("B4", val_res["Growth_5Y"] / 100.0, pct_fmt)
-    ws2.write("A5", "Perpetual Terminal Growth Rate (g <= 6.0%)", lbl_fmt)
+    ws2.write("A5", "Perpetual Terminal Growth Rate (g %)", lbl_fmt)
     ws2.write("B5", val_res["Term_Growth"] / 100.0, pct_fmt)
 
     ws2.write("A7", "10-Year Projection Schedule (Mid-Year Convention)", sub_hdr_fmt)
@@ -1073,38 +1237,36 @@ def generate_v6_institutional_excel(stock_row, val_res, weights):
     ws2.write("A16", "Present Value of Terminal Value", lbl_fmt)
     ws2.write_formula("B16", "=B15/((1+$B$3)^10)", val_fmt, val_res["PV_Terminal_Value"])
 
-    ws3 = wb.add_worksheet("4Model_Triangulation")
+    ws3 = wb.add_worksheet("Regime_Valuation_Matrix")
     ws3.set_column("A:E", 28)
-    ws3.merge_range("A1:E1", f"4-MODEL INSTITUTIONAL VALUATION TRIANGULATION ({stock_row['Category']}) — {stock_row['Ticker']}", title_fmt)
-    ws3.write("A3", "Valuation Technique", sub_hdr_fmt)
-    ws3.write("B3", "Model Fair Value (₹)", sub_hdr_fmt)
-    ws3.write("C3", f"{stock_row['Category']} Weight (%)", sub_hdr_fmt)
-    ws3.write("D3", "Weighted Contribution (₹)", sub_hdr_fmt)
-    ws3.write("E3", "Implied Upside vs CMP (%)", sub_hdr_fmt)
+    ws3.merge_range("A1:E1", f"REGIME VALUATION BREAKDOWN ({val_res['Regime']}) — {stock_row['Ticker']}", title_fmt)
+    ws3.write("A3", "Valuation Component", sub_hdr_fmt)
+    ws3.write("B3", "Method Used", sub_hdr_fmt)
+    ws3.write("C3", "Method Fair Value (₹)", sub_hdr_fmt)
+    ws3.write("D3", "Regime Weight (%)", sub_hdr_fmt)
+    ws3.write("E3", "Weighted Contribution (₹)", sub_hdr_fmt)
 
-    w_m = val_res["Weights_Tuple"]
-    models_data = [
-        ("1. 10Y Damodaran DCF / Excess Return", val_res["M1_DCF_FV"], w_m[0]),
-        ("2. Bruce Greenwald EPV / Justified P/B", val_res["M2_EPV_FV"], w_m[1]),
-        ("3. 3Y Forward Discounted Exit EV/EBITDA", val_res["M3_EV_EBITDA_FV"], w_m[2]),
-        ("4. Peter Lynch / GARP 2Y Forward P/E", val_res["M4_GARP_PE_FV"], w_m[3]),
-    ]
-    for r_i, (m_name, m_fv, m_wt) in enumerate(models_data, start=4):
-        ws3.write(f"A{r_i}", m_name, lbl_fmt)
-        ws3.write(f"B{r_i}", m_fv, curr_fmt)
-        ws3.write(f"C{r_i}", m_wt, pct_fmt)
-        ws3.write_formula(f"D{r_i}", f"=B{r_i}*C{r_i}", val_fmt, m_fv * m_wt)
-        ws3.write_formula(f"E{r_i}", f"=(B{r_i}-{stock_row['CMP']})/{stock_row['CMP']}", pct_fmt, (m_fv - stock_row["CMP"]) / stock_row["CMP"])
+    ws3.write("A4", "Main Valuation Method", lbl_fmt)
+    ws3.write("B4", val_res["Main_Method_Name"], tag_fmt)
+    ws3.write("C4", val_res["Main_FV"], curr_fmt)
+    ws3.write("D4", val_res["Main_Weight"], pct_fmt)
+    ws3.write_formula("E4", "=C4*D4", val_fmt, val_res["Main_FV"] * val_res["Main_Weight"])
 
-    ws3.write("A8", "TRIANGULATED FAIR VALUE PER SHARE (₹)", sub_hdr_fmt)
-    ws3.write("B8", "", sub_hdr_fmt)
-    ws3.write_formula("C8", "=SUM(C4:C7)", pct_fmt, 1.0)
-    ws3.write_formula("D8", "=SUM(D4:D7)", curr_fmt, val_res["Fair_Value"])
-    ws3.write_formula("E8", f"=(D8-{stock_row['CMP']})/{stock_row['CMP']}", pct_fmt, val_res["Upside_Pct"] / 100.0)
+    ws3.write("A5", "Supporting Valuation Method", lbl_fmt)
+    ws3.write("B5", val_res["Supp_Method_Name"], tag_fmt)
+    ws3.write("C5", val_res["Supp_FV"], curr_fmt)
+    ws3.write("D5", val_res["Supp_Weight"], pct_fmt)
+    ws3.write_formula("E5", "=C5*D5", val_fmt, val_res["Supp_FV"] * val_res["Supp_Weight"])
+
+    ws3.write("A6", "FINAL BLENDED FAIR VALUE (₹)", sub_hdr_fmt)
+    ws3.write("B6", val_res["Regime"], sub_hdr_fmt)
+    ws3.write("C6", "", sub_hdr_fmt)
+    ws3.write_formula("D6", "=SUM(D4:D5)", pct_fmt, 1.0)
+    ws3.write_formula("E6", "=SUM(E4:E5)", curr_fmt, val_res["Fair_Value"])
 
     ws4 = wb.add_worksheet("Sensitivity_Matrix_2D")
     ws4.set_column("A:F", 20)
-    ws4.merge_range("A1:F1", f"2D SENSITIVITY MATRIX: TRIANGULATED FAIR VALUE (₹) — {stock_row['Ticker']}", title_fmt)
+    ws4.merge_range("A1:F1", f"2D SENSITIVITY MATRIX: FAIR VALUE (₹) — {stock_row['Ticker']}", title_fmt)
 
     w_steps = [round(val_res["WACC"] + d, 2) for d in [-1.0, -0.5, 0.0, 0.5, 1.0]]
     g_steps = [round(min(val_res["Term_Growth"] + d, 6.0), 2) for d in [-1.0, -0.5, 0.0, 0.25, 0.5]]
@@ -1138,7 +1300,7 @@ def generate_v6_institutional_excel(stock_row, val_res, weights):
     return output.getvalue()
 
 # ---------------------------------------------------------
-# 11. CLEAN, MINIMALIST & FRESH SIDEBAR (v6.0)
+# 11. CLEAN, MINIMALIST & FRESH SIDEBAR
 # ---------------------------------------------------------
 st.sidebar.markdown("### 🏛️ QUANT-APEX Control")
 
@@ -1197,7 +1359,7 @@ cyclical_haircut = st.sidebar.slider(
 # 12. MAIN UI: 3 INSTITUTIONAL TABS
 # ---------------------------------------------------------
 tab_rank, tab_alloc, tab_backtest = st.tabs([
-    "🏆 1. Quant Ranking & 4-Model Valuation",
+    "🏆 1. Quant Ranking & 8-Regime Valuation",
     "💼 2. Portfolio Capital Allocator (₹)",
     "📈 3. Walk-Forward Backtesting Lab"
 ])
@@ -1210,8 +1372,6 @@ with tab_rank:
     )
 
     weights = CATEGORY_WEIGHTS[selected_cap]
-    val_w = VALUATION_MODEL_WEIGHTS[selected_cap]
-
     cw = st.columns(5)
     cw[0].metric("1. Profitability / ROA", f"{weights['Profitability']} Marks")
     cw[1].metric("2. Growth & Scale", f"{weights['Growth']} Marks")
@@ -1219,20 +1379,25 @@ with tab_rank:
     cw[3].metric("4. Governance & Forensics", f"{weights['Governance']} Marks")
     cw[4].metric("5. Valuation Comfort", f"{weights['Valuation']} Marks")
 
-    st.caption(
-        f"**Active {selected_cap} Valuation Triangulation Weights:** "
-        f"`{int(val_w[0]*100)}%` 10Y Damodaran DCF · "
-        f"`{int(val_w[1]*100)}%` Greenwald EPV Safety Floor · "
-        f"`{int(val_w[2]*100)}%` 3Y Forward Exit EV/EBITDA · "
-        f"`{int(val_w[3]*100)}%` Peter Lynch GARP Forward P/E"
-    )
+    with st.expander("📋 View Active 8-Category Institutional Valuation Matrix (Main + Supporting Methods)", expanded=False):
+        matrix_df = pd.DataFrame([
+            {"Stock Category / Business": "Large-Cap, stable cash flow", "Main Valuation Method": "FCFF DCF", "Supporting Method": "P/E, EV/EBITDA", "Blend Weight": "60% Main / 40% Supp"},
+            {"Stock Category / Business": "Mid-Cap, growing earnings", "Main Valuation Method": "DCF + peer multiples", "Supporting Method": "Scenario analysis", "Blend Weight": "60% Main / 40% Supp"},
+            {"Stock Category / Business": "Small-Cap, profitable", "Main Valuation Method": "Conservative DCF", "Supporting Method": "Peer P/E, EV/EBITDA", "Blend Weight": "50% Main / 50% Supp"},
+            {"Stock Category / Business": "High-growth, low-profit", "Main Valuation Method": "Forecast-based DCF", "Supporting Method": "EV/Sales", "Blend Weight": "55% Main / 45% Supp"},
+            {"Stock Category / Business": "Penny / micro-cap, profitable", "Main Valuation Method": "Conservative DCF", "Supporting Method": "P/B, peer multiples", "Blend Weight": "55% Main / 45% Supp"},
+            {"Stock Category / Business": "Distressed / loss-making", "Main Valuation Method": "Asset recovery value", "Supporting Method": "Survival and dilution analysis", "Blend Weight": "60% Main / 40% Supp"},
+            {"Stock Category / Business": "Banks and NBFCs", "Main Valuation Method": "Residual income / justified P/B", "Supporting Method": "ROE, asset quality", "Blend Weight": "65% Main / 35% Supp"},
+            {"Stock Category / Business": "Holding companies", "Main Valuation Method": "Sum-of-the-Parts (SOTP)", "Supporting Method": "Holding-company discount", "Blend Weight": "60% Main / 40% Supp"},
+        ])
+        st.dataframe(matrix_df, use_container_width=True, hide_index=True)
 
     ranked_df = evaluate_stocks(st.session_state.master_df, selected_cap, weights, cyclical_haircut=cyclical_haircut)
 
     st.subheader(f"🏆 {selected_cap} Institutional Alpha Leaderboard ({len(ranked_df)} Stocks Ranked)")
     display_cols = [
-        "Rank", "Ticker", "Company", "Sector", "Final_Score", "Fundamental_Score", "Tech_Score",
-        "CMP", "Fair_Value", "Upside_Pct", "Valuation_Status", "Verdict"
+        "Rank", "Ticker", "Company", "Valuation_Regime", "Main_Method", "Supporting_Method",
+        "Final_Score", "Fundamental_Score", "Tech_Score", "CMP", "Fair_Value", "Upside_Pct", "Valuation_Status", "Verdict"
     ]
 
     st.dataframe(
@@ -1254,12 +1419,12 @@ with tab_rank:
     )
 
     st.divider()
-    st.subheader("🔍 Deep-Dive 4-Model Valuation Triangulation & 5-Tab Excel Generator")
+    st.subheader("🔍 Deep-Dive Regime Valuation & 5-Tab Excel Generator")
 
     c_sel, c_s1, c_s2, c_s3 = st.columns([1.3, 1, 1, 1])
     with c_sel:
         selected_ticker = st.selectbox(
-            "Select Stock for 4-Model Valuation & Excel Export:",
+            "Select Stock for Regime Valuation & Excel Export:",
             options=ranked_df["Ticker"].tolist(),
             format_func=lambda x: f"{x} — {ranked_df[ranked_df['Ticker']==x]['Company'].values[0]} ({ranked_df[ranked_df['Ticker']==x]['Rank'].values[0]})"
         )
@@ -1303,24 +1468,23 @@ with tab_rank:
     with c_s2:
         u_wacc = st.slider("Size-Adjusted WACC / Ke (%)", 8.5, 18.0, float(base_val["WACC"]), 0.25, key=f"wacc_{selected_ticker}")
     with c_s3:
-        u_tg = st.slider("Terminal Growth (Capped <= 6.0%)", 3.0, 6.0, float(min(base_val["Term_Growth"], 6.0)), 0.25, key=f"tg_{selected_ticker}")
+        u_tg = st.slider("Terminal Growth (Capped <= 6.0%)", 2.5, 6.0, float(min(base_val["Term_Growth"], 6.0)), 0.25, key=f"tg_{selected_ticker}")
 
     live_val = run_3stage_valuation(stock_row, custom_g5=u_g5, custom_wacc=u_wacc, custom_tg=u_tg, cyclical_haircut_pct=cyclical_haircut)
-    w_m = live_val["Weights_Tuple"]
 
     m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("Current Price (CMP)", f"₹{stock_row['CMP']:,.1f}", f"WACC: {live_val['WACC']:.2f}%")
-    m2.metric(f"1. 10Y DCF ({int(w_m[0]*100)}% wt)", f"₹{live_val['M1_DCF_FV']:,.1f}")
-    m3.metric(f"2. Greenwald EPV ({int(w_m[1]*100)}% wt)", f"₹{live_val['M2_EPV_FV']:,.1f}")
-    m4.metric(f"3. 3Y Exit EV/EBITDA ({int(w_m[2]*100)}% wt)", f"₹{live_val['M3_EV_EBITDA_FV']:,.1f}")
-    m5.metric(f"4. GARP Forward P/E ({int(w_m[3]*100)}% wt)", f"₹{live_val['M4_GARP_PE_FV']:,.1f}")
-    m6.metric("Triangulated Fair Value", f"₹{live_val['Fair_Value']:,.1f}", f"{live_val['Upside_Pct']:+.1f}% vs CMP")
+    m1.metric("Detected Business Regime", live_val["Regime"])
+    m2.metric("Current Price (CMP)", f"₹{stock_row['CMP']:,.1f}", f"WACC: {live_val['WACC']:.2f}%")
+    m3.metric(f"Main: {live_val['Main_Method_Name']} ({int(live_val['Main_Weight']*100)}%)", f"₹{live_val['Main_FV']:,.1f}")
+    m4.metric(f"Supp: {live_val['Supp_Method_Name']} ({int(live_val['Supp_Weight']*100)}%)", f"₹{live_val['Supp_FV']:,.1f}")
+    m5.metric("Blended Fair Value", f"₹{live_val['Fair_Value']:,.1f}", f"{live_val['Upside_Pct']:+.1f}% vs CMP")
+    m6.metric("Technical Regime", f"{stock_row['Tech_Score']}/100", f"RSI: {stock_row['RSI_14']} | ADX: {stock_row['ADX_14']}")
 
-    excel_data = generate_v6_institutional_excel(stock_row, live_val, weights)
+    excel_data = generate_institutional_excel(stock_row, live_val, weights)
     st.download_button(
-        label=f"📥 Download {selected_ticker} 5-Tab Institutional Research & 4-Model Valuation Excel (.xlsx)",
+        label=f"📥 Download {selected_ticker} 5-Tab Institutional Research & Regime Valuation Excel (.xlsx)",
         data=excel_data,
-        file_name=f"{selected_ticker}_QUANT_APEX_v6_Master_Model.xlsx",
+        file_name=f"{selected_ticker}_QUANT_APEX_Regime_Valuation_Model.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary",
         use_container_width=True
@@ -1329,7 +1493,7 @@ with tab_rank:
     col_left, col_right = st.columns([1.2, 1])
 
     with col_left:
-        st.markdown(f"#### 📅 {selected_ticker} — 10-Year Mid-Year Discounted Cash Flow Schedule")
+        st.markdown(f"#### 📅 {selected_ticker} — 10-Year Projection Schedule ({live_val['Regime']})")
         schedule_df = pd.DataFrame({
             "Year": [f"Y{i}" for i in range(1, 11)],
             "Stage": ["Stage 1 (High)" if i <= 5 else "Stage 2 (Fade)" for i in range(1, 11)],
@@ -1346,22 +1510,22 @@ with tab_rank:
         }), use_container_width=True, hide_index=True)
 
     with col_right:
-        st.markdown(f"#### 🏈 4-Model Valuation Football Field ({selected_ticker} — {stock_row['Category']})")
+        st.markdown(f"#### 🏈 Regime Valuation Football Field ({selected_ticker})")
         ff_df = pd.DataFrame({
             "Valuation Method": [
-                f"1. 10Y Damodaran DCF ({int(w_m[0]*100)}%)",
-                f"2. Greenwald EPV Floor ({int(w_m[1]*100)}%)",
-                f"3. 3Y Exit EV/EBITDA ({int(w_m[2]*100)}%)",
-                f"4. GARP Forward P/E ({int(w_m[3]*100)}%)",
-                "⭐ Triangulated Fair Value",
+                "Bear Case (-18% Stress)",
+                f"Main: {live_val['Main_Method_Name']} ({int(live_val['Main_Weight']*100)}%)",
+                f"Supp: {live_val['Supp_Method_Name']} ({int(live_val['Supp_Weight']*100)}%)",
+                "⭐ Final Blended Fair Value",
+                "Bull Case (+20% Blue-Sky)",
                 "📍 Current Market Price (CMP)"
             ],
             "Price (₹)": [
-                live_val["M1_DCF_FV"],
-                live_val["M2_EPV_FV"],
-                live_val["M3_EV_EBITDA_FV"],
-                live_val["M4_GARP_PE_FV"],
+                live_val["Bear_Case_FV"],
+                live_val["Main_FV"],
+                live_val["Supp_FV"],
                 live_val["Fair_Value"],
+                live_val["Bull_Case_FV"],
                 stock_row["CMP"]
             ]
         })
@@ -1408,7 +1572,7 @@ with tab_alloc:
         basket_df["Actual_Invested_INR"] = basket_df["Shares_To_Buy"] * basket_df["CMP"]
 
         alloc_display = [
-            "Ticker", "Company", "Category", "Final_Score", "CMP", "Fair_Value", "Upside_Pct",
+            "Ticker", "Company", "Valuation_Regime", "Final_Score", "CMP", "Fair_Value", "Upside_Pct",
             "Weight_Pct", "Allocated_INR", "Shares_To_Buy", "Actual_Invested_INR", "Verdict"
         ]
         st.dataframe(
@@ -1519,3 +1683,4 @@ with tab_backtest:
         )
     else:
         st.warning("No clean stocks available in this segment to run backtest.")
+# ================= END OF PART 2 (COMPLETE FILE) =================
